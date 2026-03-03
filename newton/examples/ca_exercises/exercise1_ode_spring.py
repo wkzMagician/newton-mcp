@@ -35,10 +35,10 @@ class Exercise1ODESpring:
 
         self.viewer.set_model(self.model)
 
-        self.method = 0 # 0: Analytic, 1: Explicit Euler, 2: Semi-Implicit Euler or 3: RK4
+        self.method = 0 # 0: Analytic, 1: Explicit Euler, 2: Semi-Implicit Euler, 3: Mid-Point, 4: RK4
 
     def gui(self, ui):
-        _changed, self.method = ui.combo("Method", self.method, ["Analytic", "Explicit Euler", "Semi-Implicit Euler", "RK4"])
+        _changed, self.method = ui.combo("Method", self.method, ["Analytic", "Explicit Euler", "Semi-Implicit Euler", "Mid-Point", "RK4"])
 
     def step(self):
         self.solver.method = self.method
