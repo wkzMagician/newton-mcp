@@ -23,6 +23,13 @@ This repository contains the code for the computer animation exercise. The code 
    ```bash
    .\.venv\Scripts\activate
    ```
+   
+5. If everything's alright, you will see a window like below:
+   ![empty](./empty.png)
+   Controls:
+   - WASD: move camera
+   - QE: move camera up/down
+   - Left click: lock around
 
 ## Handin
 
@@ -30,4 +37,4 @@ This repository contains the code for the computer animation exercise. The code 
 
 After you finish one exercise, **You only need to submit the modified `.py` files in `newton/_src/solvers/ca_exercises/`.** Please compress these files into a zip file and submit it to Canvas. The file name should be in the format of `ca_exercise<n>_<student_id>.zip`.
 
-Notes: each exercise may have its own additional requirements, please pay attention.
+**Notes**: each exercise may have its own additional requirements, please pay attention.
