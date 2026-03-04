@@ -12,7 +12,7 @@ class SolverExercise1ODESpring(SolverBase):
     def __init__(self, model: Model):
         super().__init__(model)
 
-        # 0: Analytic, 1: Explicit Euler, 2: Semi-Implicit Euler, 3: Mid-Point, 4: RK4
+        self.method = 0 # 0: Analytic, 1: Explicit Euler, 2: Semi-Implicit Euler, 3: Mid-Point, 4: RK4
 
         self.gravity = -9.81
         self.spring_rest_length = 5.0

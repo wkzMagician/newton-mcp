@@ -26,3 +26,5 @@ This repository contains the code for the computer animation exercise. The code 
 **You only need to modify the `TODO` sections in the code.** You can run the code to test your implementation, but please do not modify the code structure or add any new files.
 
 After you finish one exercise, **You only need to submit the modified `.py` files in `newton/_src/solvers/ca_exercises/`.** Please compress these files into a zip file and submit it to Canvas. The file name should be in the format of `ca_exercise<n>_<student_id>.zip`.
+
+Notes: each exercise may have its own additional requirements, please pay attention.
