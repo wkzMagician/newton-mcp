@@ -19,7 +19,10 @@ This repository contains the code for the computer animation exercise. The code 
    ```bash
    uv sync --extra examples
    ```
-4. Use any IDE of your choice to open the project and run the script in `examples/ca_exercises/` directory. (PyCharm is recommended)
+4. Use any IDE (PyCharm is recommended) of your choice to open the project and run the script in `examples/ca_exercises/` directory. PyCharm will automatically recognize the virtual environments, if not, you can activate it using the command below:
+   ```bash
+   .\.venv\Scripts\activate
+   ```
 
 ## Handin
 
