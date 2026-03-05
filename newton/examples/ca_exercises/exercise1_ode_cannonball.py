@@ -22,6 +22,7 @@ class Exercise1ODECannonBall:
         body = builder.add_body(
             xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.0), q=wp.quat_identity()),
             mass=1.0,
+            lock_inertia=True,
         )
         builder.add_shape_sphere(body=body, radius=1.0)
 
