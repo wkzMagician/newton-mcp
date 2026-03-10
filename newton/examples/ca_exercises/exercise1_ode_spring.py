@@ -31,8 +31,11 @@ class Exercise1ODESpring:
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
+        self.initial_state = self.model.state()
         self.control = self.model.control()
         self.contacts = self.model.contacts()
+
+        self.initial_state.assign(self.state_0)
 
         self.viewer.set_model(self.model)
 
@@ -40,6 +43,15 @@ class Exercise1ODESpring:
 
     def gui(self, ui):
         _changed, self.method = ui.combo("Method", self.method, ["Analytic", "Explicit Euler", "Semi-Implicit Euler", "Mid-Point", "RK4"])
+        if ui.button("Reset"):
+            self.reset()
+
+    def reset(self):
+        self.viewer._paused = True
+        self.sim_time = 0.0
+        self.state_0.assign(self.initial_state)
+        self.state_1.assign(self.initial_state)
+        self.solver.reset()
 
     def step(self):
         self.solver.method = self.method

@@ -73,6 +73,11 @@ class SolverExercise1ODECannonBall(SolverBase):
         self.initial_poses = wp.clone(self.model.body_q)
         self.initial_velocities = wp.clone(self.model.body_qd)
 
+    def reset(self):
+        self.time = 0.0
+        self.initial_poses = wp.clone(self.model.body_q)
+        self.initial_velocities = wp.clone(self.model.body_qd)
+
     def analytic(self, state_in: State, state_out: State, dt: float):
         wp.launch(
             analytic_kernel,

@@ -20,7 +20,14 @@ class SolverExercise1ODESpring(SolverBase):
         self.spring_damping = 0.1
 
         # TODO: You can add additional attributes here if needed
+        # Notes: the ball is initially at (0, 0, -spring_rest_length) with zero velocity, 
+        # and the spring is attached to the origin (0, 0, 0). You can change the parameters
+        # above to attain better results
 
+    def reset(self):
+        # TODO: reset any additional attributes you added in the constructor here
+        
+        pass
 
     def analytic(self, state_in: State, state_out: State, dt: float):
         # TODO: launch the analytic kernel here
