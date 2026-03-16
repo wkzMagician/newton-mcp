@@ -79,6 +79,7 @@ class SolverExercise1ODECannonBall(SolverBase):
         self.initial_velocities = wp.clone(self.model.body_qd)
 
     def analytic(self, state_in: State, state_out: State, dt: float):
+        self.time += dt
         wp.launch(
             analytic_kernel,
             dim=self.model.body_count,
@@ -91,7 +92,6 @@ class SolverExercise1ODECannonBall(SolverBase):
                 self.time,
             ],
         )
-        self.time += dt
 
     def explicit_euler(self, state_in: State, state_out: State, dt: float):
         wp.launch(
