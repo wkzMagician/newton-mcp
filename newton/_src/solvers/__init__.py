@@ -24,6 +24,8 @@ from .vbd import SolverVBD
 from .xpbd import SolverXPBD
 from .ca_exercises import SolverExercise1ODECannonBall
 from .ca_exercises import SolverExercise1ODESpring
+from .ca_exercises import SolverExercise2ConstraintWire
+from .ca_exercises import SolverExercise2ConstraintPendulum
 
 __all__ = [
     "SolverBase",
@@ -36,5 +38,7 @@ __all__ = [
     "SolverVBD",
     "SolverXPBD",
     "SolverExercise1ODECannonBall",
-    "SolverExercise1ODESpring"
+    "SolverExercise1ODESpring",
+    "SolverExercise2ConstraintWire",
+    "SolverExercise2ConstraintPendulum"
 ]

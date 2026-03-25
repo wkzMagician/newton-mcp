@@ -122,7 +122,9 @@ from ._src.solvers import (
     SolverXPBD,
     style3d,
     SolverExercise1ODECannonBall,
-    SolverExercise1ODESpring
+    SolverExercise1ODESpring,
+    SolverExercise2ConstraintWire,
+    SolverExercise2ConstraintPendulum
 )
 
 # solver flags
@@ -140,5 +142,7 @@ __all__ = [
     "SolverXPBD",
     "style3d",
     "SolverExercise1ODECannonBall",
-    "SolverExercise1ODESpring"
+    "SolverExercise1ODESpring",
+    "SolverExercise2ConstraintWire",
+    "SolverExercise2ConstraintPendulum"
 ]
