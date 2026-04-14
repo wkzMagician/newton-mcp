@@ -124,7 +124,8 @@ from ._src.solvers import (
     SolverExercise1ODECannonBall,
     SolverExercise1ODESpring,
     SolverExercise2ConstraintWire,
-    SolverExercise2ConstraintPendulum
+    SolverExercise2ConstraintPendulum,
+    SolverExercise3RigidBody,
 )
 
 # solver flags
@@ -144,5 +145,6 @@ __all__ = [
     "SolverExercise1ODECannonBall",
     "SolverExercise1ODESpring",
     "SolverExercise2ConstraintWire",
-    "SolverExercise2ConstraintPendulum"
+    "SolverExercise2ConstraintPendulum",
+    "SolverExercise3RigidBody",
 ]
