@@ -18,7 +18,7 @@ class Exercise3RigidBody:
 
         builder = newton.ModelBuilder()
         builder.default_shape_cfg.mu = 0.6
-        builder.default_shape_cfg.restitution = 0.1
+        builder.default_shape_cfg.restitution = 0.5
         # Keep teaching setup visually tight: avoid speculative stand-off gaps.
         builder.default_shape_cfg.margin = -0.005
         builder.default_shape_cfg.gap = 0.0
