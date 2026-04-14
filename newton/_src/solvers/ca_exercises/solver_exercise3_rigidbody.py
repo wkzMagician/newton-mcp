@@ -82,15 +82,16 @@ def world_inv_inertia(q: wp.transform, inv_inertia_body: wp.mat33) -> wp.mat33:
 @wp.kernel
 def sequential_impulse_contacts_kernel(
     dt: float,
-    baumgarte: float, # Stabilization factor for penetration error correction.
+    baumgarte: float,
     shape_body: wp.array(dtype=wp.int32),
     body_com: wp.array(dtype=wp.vec3),
     body_inv_mass: wp.array(dtype=float),
     body_inv_inertia: wp.array(dtype=wp.mat33),
     shape_material_mu: wp.array(dtype=float),
     shape_material_restitution: wp.array(dtype=float),
-    body_q: wp.array(dtype=wp.transform),
-    body_qd: wp.array(dtype=wp.spatial_vector),
+    body_q: wp.array(dtype=wp.transform),               # Current body transforms
+    body_qd: wp.array(dtype=wp.spatial_vector),         # Current body velocities (linear, angular)
+    body_qd_old: wp.array(dtype=wp.spatial_vector),     # Old body velocities
     contact_count: wp.array(dtype=wp.int32),
     contact_max: int,
     contact_shape0: wp.array(dtype=wp.int32),
@@ -103,6 +104,7 @@ def sequential_impulse_contacts_kernel(
     contact_lambda_n: wp.array(dtype=float),
     contact_lambda_t: wp.array(dtype=float),
 ):
+    # Single-thread loop for true sequential (Gauss-Seidel) updates.
     if wp.tid() != 0:
         return
 
@@ -114,9 +116,6 @@ def sequential_impulse_contacts_kernel(
         body_a = shape_body[shape_a]
         body_b = shape_body[shape_b]
 
-        if body_a < 0 and body_b < 0:
-            continue
-
         xform_a = wp.transform_identity()
         xform_b = wp.transform_identity()
         if body_a >= 0:
@@ -127,8 +126,13 @@ def sequential_impulse_contacts_kernel(
         if body_a == body_b:
             continue
 
+        # Contact point in world space
+        p_a = wp.transform_point(xform_a, contact_point0[c] + contact_offset0[c])
+        p_b = wp.transform_point(xform_b, contact_point1[c] + contact_offset1[c])
+
         # TODO: Implement the sequential impulse solver for contact c, using the provided 
         #       data and accumulating impulses in contact_lambda_n and contact_lambda_t.
+
 
 
 class SolverExercise3RigidBody(SolverBase):
@@ -297,6 +301,7 @@ class SolverExercise3RigidBody(SolverBase):
     def _solve_contacts(self, state: State, contacts: Contacts, dt: float) -> None:
         self.contact_lambda_n.zero_()
         self.contact_lambda_t.zero_()
+        old_body_qd = wp.clone(state.body_qd)
         for _ in range(self.iterations):
             wp.launch(
                 kernel=sequential_impulse_contacts_kernel,
@@ -312,6 +317,7 @@ class SolverExercise3RigidBody(SolverBase):
                     self.model.shape_material_restitution,
                     state.body_q,
                     state.body_qd,
+                    old_body_qd,
                     contacts.rigid_contact_count,
                     contacts.rigid_contact_max,
                     contacts.rigid_contact_shape0,

@@ -12,14 +12,17 @@ class Exercise3RigidBody:
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.sim_time = 0.0
 
+        self.iterations = 20
+        self.angular_damping = 0.6
+        self.baumgarte = 0.2
+
         self.viewer = viewer
         self.viewer._paused = True
         self.args = args
 
         builder = newton.ModelBuilder()
-        builder.default_shape_cfg.mu = 0.6
-        builder.default_shape_cfg.restitution = 0.5
-        # Keep teaching setup visually tight: avoid speculative stand-off gaps.
+        builder.default_shape_cfg.mu = 0.5
+        builder.default_shape_cfg.restitution = 0.8
         builder.default_shape_cfg.margin = -0.005
         builder.default_shape_cfg.gap = 0.0
 
@@ -47,9 +50,9 @@ class Exercise3RigidBody:
 
         self.solver = newton.solvers.SolverExercise3RigidBody(
             self.model,
-            iterations=20,
-            baumgarte=0.2,
-            angular_damping=0.6
+            iterations=self.iterations,
+            baumgarte=self.baumgarte,
+            angular_damping=self.angular_damping
         )
 
         self.state_0 = self.model.state()
