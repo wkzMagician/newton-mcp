@@ -116,6 +116,9 @@ def sequential_impulse_contacts_kernel(
         body_a = shape_body[shape_a]
         body_b = shape_body[shape_b]
 
+        if body_a < 0 and body_b < 0:
+            continue
+
         xform_a = wp.transform_identity()
         xform_b = wp.transform_identity()
         if body_a >= 0:
