@@ -126,6 +126,7 @@ from ._src.solvers import (
     SolverExercise2ConstraintWire,
     SolverExercise2ConstraintPendulum,
     SolverExercise3RigidBody,
+    SolverExercise4Cloth,
 )
 
 # solver flags
@@ -147,4 +148,5 @@ __all__ = [
     "SolverExercise2ConstraintWire",
     "SolverExercise2ConstraintPendulum",
     "SolverExercise3RigidBody",
+    "SolverExercise4Cloth",
 ]
