@@ -20,8 +20,8 @@ class Exercise4Cloth:
         self.particle_mass = 1.0
 
         # Spring parameters
-        self.k_struct = 3000.0
-        self.k_bend = 100.0
+        self.k_struct = 500.0
+        self.k_bend = 60.0
         self.k_shear = 50.0
         self.damping = 10.0
 

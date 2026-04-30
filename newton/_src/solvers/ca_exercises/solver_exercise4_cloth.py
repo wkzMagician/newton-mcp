@@ -82,8 +82,9 @@ def semi_implicit_euler_integrate_kernel(
     particle_qd_out: wp.array(dtype=wp.vec3),
     particle_f: wp.array(dtype=wp.vec3),
     particle_mass: float,
-    particle_flags: wp.array(dtype=wp.int32),
     dt: float,
+    grid_n: int,
+    grid_m: int,
 ):
     idx = wp.tid()
 
