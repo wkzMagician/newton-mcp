@@ -41,6 +41,7 @@ class Exercise5Fluid:
             wind_strength=0.05,
             source_box=((0.35, 0.35, 0.05), (0.65, 0.65, 0.15)),
             obstacle_box=((0.40, 0.40, 0.60), (0.60, 0.60, 0.70)),
+            obstacle_on=False,
         )
 
         self.state_0 = self.model.state()
@@ -65,6 +66,10 @@ class Exercise5Fluid:
             self.reset()
 
         _changed, self.solver.wind_on = ui.checkbox("Apply Wind", self.solver.wind_on)
+
+        obstacle_changed, new_obstacle_on = ui.checkbox("Obstacle", self.solver.obstacle_on)
+        if obstacle_changed:
+            self.solver.set_obstacle_active(new_obstacle_on)
 
     def reset(self):
         self.sim_time = 0.0

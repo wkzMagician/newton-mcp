@@ -360,6 +360,7 @@ class SolverExercise5Fluid(SolverBase):
             (0.40, 0.40, 0.40),
             (0.60, 0.60, 0.50),
         ),
+        obstacle_on: bool = True,
     ):
         super().__init__(model)
 
@@ -383,6 +384,7 @@ class SolverExercise5Fluid(SolverBase):
 
         self._source_box = source_box
         self._obstacle_box = obstacle_box
+        self.obstacle_on = bool(obstacle_on)
 
         device = model.device
 
@@ -454,7 +456,7 @@ class SolverExercise5Fluid(SolverBase):
         )
 
     def _build_solid_mask(self) -> None:
-        if self._obstacle_box is None:
+        if not self.obstacle_on or self._obstacle_box is None:
             return
         lo = self._clamp_cell(self._world_to_cell(self._obstacle_box[0]))
         hi = self._clamp_cell(self._world_to_cell(self._obstacle_box[1]))
@@ -466,6 +468,16 @@ class SolverExercise5Fluid(SolverBase):
             inputs=[self.solid, wp.vec3i(*lo), wp.vec3i(*hi)],
             device=self.model.device,
         )
+
+    def set_obstacle_active(self, active: bool) -> None:
+        """Enable or disable the solid obstacle at runtime.
+
+        Rebuilds the solid mask immediately; pressure and velocity fields are kept
+        so the flow transitions smoothly around the change.
+        """
+        self.obstacle_on = bool(active)
+        self.solid.zero_()
+        self._build_solid_mask()
 
     def _clamp_cell(self, cell: tuple[int, int, int]) -> tuple[int, int, int]:
         return (
