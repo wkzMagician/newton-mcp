@@ -39,8 +39,15 @@ def broadphase_dynamic_aabb_tree_kernel(
         if j <= i:
             continue
 
-        # TODO: Check whether the AABBs overlap
-
+        if not check_aabb_overlap(
+            lower_i,
+            upper_i,
+            0.0,
+            shape_aabb_lower[j],
+            shape_aabb_upper[j],
+            0.0,
+        ):
+            continue
 
         pair = wp.vec2i(i, j)
         pair_id = wp.atomic_add(candidate_pair_count, 0, 1)
@@ -63,14 +70,29 @@ def integrate_bodies_kernel(
     if i >= body_count:
         return
 
-    q_new = body_q[i]
-    qd_new = body_qd[i]
+    q = body_q[i]
+    qd = body_qd[i]
 
-    # TODO: Integrate body i using semi-implicit Euler with the given gravity and angular damping.
+    inv_mass = body_inv_mass[i]
 
+    if inv_mass > 0.0:
+        # Linear integration with gravity.
+        lin_vel = wp.spatial_top(qd)
+        lin_vel += gravity * dt
 
-    body_q_out[i] = q_new
-    body_qd_out[i] = qd_new
+        # Angular integration with damping.
+        ang_vel = wp.spatial_bottom(qd)
+        ang_vel *= 1.0 / (1.0 + angular_damping * dt)
+
+        # Update state.
+        qd_new = wp.spatial_vector(lin_vel, ang_vel)
+        p_new = wp.transform_get_translation(q) + lin_vel * dt
+        r = wp.transform_get_rotation(q)
+        r_new = wp.normalize(r + wp.quat(ang_vel, 0.0) * r * 0.5 * dt)
+        q_new = wp.transform(p_new, r_new)
+
+        body_q_out[i] = q_new
+        body_qd_out[i] = qd_new
 
 
 @wp.func
@@ -89,9 +111,9 @@ def sequential_impulse_contacts_kernel(
     body_inv_inertia: wp.array(dtype=wp.mat33),
     shape_material_mu: wp.array(dtype=float),
     shape_material_restitution: wp.array(dtype=float),
-    body_q: wp.array(dtype=wp.transform),               # Current body transforms
-    body_qd: wp.array(dtype=wp.spatial_vector),         # Current body velocities (linear, angular)
-    body_qd_old: wp.array(dtype=wp.spatial_vector),     # Old body velocities
+    body_q: wp.array(dtype=wp.transform),
+    body_qd: wp.array(dtype=wp.spatial_vector),
+    body_qd_old: wp.array(dtype=wp.spatial_vector),
     contact_count: wp.array(dtype=wp.int32),
     contact_max: int,
     contact_shape0: wp.array(dtype=wp.int32),
@@ -129,13 +151,176 @@ def sequential_impulse_contacts_kernel(
         if body_a == body_b:
             continue
 
-        # Contact point in world space
+        # Use offset-adjusted points so spherical/capsule thickness contributes correctly.
         p_a = wp.transform_point(xform_a, contact_point0[c] + contact_offset0[c])
         p_b = wp.transform_point(xform_b, contact_point1[c] + contact_offset1[c])
 
-        # TODO: Implement the sequential impulse solver for contact c, using the provided 
-        #       data and accumulating impulses in contact_lambda_n and contact_lambda_t.
+        # Narrow phase writes normal from shape_a -> shape_b.
+        # Keep that convention so vn<0 means approaching along the contact normal.
+        n = -wp.normalize(contact_normal[c])
 
+        com_a = p_a
+        com_b = p_b
+        if body_a >= 0:
+            com_a = wp.transform_point(xform_a, body_com[body_a])
+        if body_b >= 0:
+            com_b = wp.transform_point(xform_b, body_com[body_b])
+
+        r_a = p_a - com_a
+        r_b = p_b - com_b
+
+        v_a = wp.vec3(0.0, 0.0, 0.0)
+        w_a = wp.vec3(0.0, 0.0, 0.0)
+        if body_a >= 0:
+            qd_a = body_qd[body_a]
+            v_a = wp.spatial_top(qd_a)
+            w_a = wp.spatial_bottom(qd_a)
+            v_a = v_a + wp.cross(w_a, r_a)
+            qd_a_old = body_qd_old[body_a]
+            v_a_old = wp.spatial_top(qd_a_old)
+            w_a_old = wp.spatial_bottom(qd_a_old)
+            v_a_old = v_a_old + wp.cross(w_a_old, r_a)
+
+        v_b = wp.vec3(0.0, 0.0, 0.0)
+        w_b = wp.vec3(0.0, 0.0, 0.0)
+        if body_b >= 0:
+            qd_b = body_qd[body_b]
+            v_b = wp.spatial_top(qd_b)
+            w_b = wp.spatial_bottom(qd_b)
+            v_b = v_b + wp.cross(w_b, r_b)
+            qd_b_old = body_qd_old[body_b]
+            v_b_old = wp.spatial_top(qd_b_old)
+            w_b_old = wp.spatial_bottom(qd_b_old)
+            v_b_old = v_b_old + wp.cross(w_b_old, r_b)
+
+        rel_v = v_b - v_a
+        vn = wp.dot(rel_v, n)
+        rel_v_old = v_b_old - v_a_old
+        vn_old = wp.dot(rel_v_old, n)
+
+        # Penetration bias for positional drift correction.
+        separation = wp.dot(p_b - p_a, n)
+        bias = 0.0
+        if separation < 0.0:
+            bias = baumgarte * separation / dt
+
+        inv_mass_n = 0.0
+
+        inv_mass_a = 0.0
+        inv_inertia_a_world = wp.mat33(0.0)
+        if body_a >= 0:
+            inv_mass_a = body_inv_mass[body_a]
+            inv_inertia_a_world = world_inv_inertia(xform_a, body_inv_inertia[body_a])
+            rn_a = wp.cross(r_a, n)
+            inv_mass_n += inv_mass_a + wp.dot(wp.cross(inv_inertia_a_world * rn_a, r_a), n)
+
+        inv_mass_b = 0.0
+        inv_inertia_b_world = wp.mat33(0.0)
+        if body_b >= 0:
+            inv_mass_b = body_inv_mass[body_b]
+            inv_inertia_b_world = world_inv_inertia(xform_b, body_inv_inertia[body_b])
+            rn_b = wp.cross(r_b, n)
+            inv_mass_n += inv_mass_b + wp.dot(wp.cross(inv_inertia_b_world * rn_b, r_b), n)
+
+        if inv_mass_n < 1.0e-8:
+            continue
+
+        contact_restitution = 0.0
+        restitution_mat_count = 0
+        if shape_a >= 0:
+            contact_restitution += shape_material_restitution[shape_a]
+            restitution_mat_count += 1
+        if shape_b >= 0:
+            contact_restitution += shape_material_restitution[shape_b]
+            restitution_mat_count += 1
+        if restitution_mat_count > 0:
+            contact_restitution /= float(restitution_mat_count)
+
+        restitution_term = 0.0
+        restitution_term = contact_restitution * vn_old
+
+        delta_lambda = -(vn + bias - restitution_term) / inv_mass_n
+        lambda_old = contact_lambda_n[c]
+        lambda_new = wp.max(0.0, lambda_old + delta_lambda)
+        delta_lambda = lambda_new - lambda_old
+        contact_lambda_n[c] = lambda_new
+
+        impulse = delta_lambda * n
+
+        if body_a >= 0:
+            qd_a = body_qd[body_a]
+            lin_a = wp.spatial_top(qd_a) - inv_mass_a * impulse
+            ang_a = wp.spatial_bottom(qd_a) - inv_inertia_a_world * wp.cross(r_a, impulse)
+            body_qd[body_a] = wp.spatial_vector(lin_a, ang_a)
+
+        if body_b >= 0:
+            qd_b = body_qd[body_b]
+            lin_b = wp.spatial_top(qd_b) + inv_mass_b * impulse
+            ang_b = wp.spatial_bottom(qd_b) + inv_inertia_b_world * wp.cross(r_b, impulse)
+            body_qd[body_b] = wp.spatial_vector(lin_b, ang_b)
+
+        # Tangential friction impulse (single tangent direction from current relative slip).
+        qd_a_post = wp.spatial_vector(wp.vec3(0.0), wp.vec3(0.0))
+        qd_b_post = wp.spatial_vector(wp.vec3(0.0), wp.vec3(0.0))
+        if body_a >= 0:
+            qd_a_post = body_qd[body_a]
+        if body_b >= 0:
+            qd_b_post = body_qd[body_b]
+
+        v_a_post = wp.vec3(0.0, 0.0, 0.0)
+        v_b_post = wp.vec3(0.0, 0.0, 0.0)
+        if body_a >= 0:
+            v_a_post = wp.spatial_top(qd_a_post) + wp.cross(wp.spatial_bottom(qd_a_post), r_a)
+        if body_b >= 0:
+            v_b_post = wp.spatial_top(qd_b_post) + wp.cross(wp.spatial_bottom(qd_b_post), r_b)
+
+        rel_v_post = v_b_post - v_a_post
+        vt = rel_v_post - wp.dot(rel_v_post, n) * n
+        vt_len = wp.length(vt)
+
+        if vt_len > 1.0e-7:
+            t_dir = vt / vt_len
+
+            inv_mass_t = 0.0
+            if body_a >= 0:
+                rt_a = wp.cross(r_a, t_dir)
+                inv_mass_t += inv_mass_a + wp.dot(wp.cross(inv_inertia_a_world * rt_a, r_a), t_dir)
+            if body_b >= 0:
+                rt_b = wp.cross(r_b, t_dir)
+                inv_mass_t += inv_mass_b + wp.dot(wp.cross(inv_inertia_b_world * rt_b, r_b), t_dir)
+
+            if inv_mass_t > 1.0e-8:
+                mu = 0.0
+                mat_count = 0
+                if shape_a >= 0:
+                    mu += shape_material_mu[shape_a]
+                    mat_count += 1
+                if shape_b >= 0:
+                    mu += shape_material_mu[shape_b]
+                    mat_count += 1
+                if mat_count > 0:
+                    mu /= float(mat_count)
+
+                delta_lambda_t = -wp.dot(rel_v_post, t_dir) / inv_mass_t
+                lambda_t_old = contact_lambda_t[c]
+                max_friction = mu * contact_lambda_n[c]
+                lambda_t_new = wp.clamp(lambda_t_old + delta_lambda_t, -max_friction, max_friction)
+                delta_lambda_t = lambda_t_new - lambda_t_old
+                contact_lambda_t[c] = lambda_t_new
+
+                impulse_t = delta_lambda_t * t_dir
+
+                if body_a >= 0:
+                    qd_a = body_qd[body_a]
+                    lin_a = wp.spatial_top(qd_a) - inv_mass_a * impulse_t
+                    ang_a = wp.spatial_bottom(qd_a) - inv_inertia_a_world * wp.cross(r_a, impulse_t)
+                    body_qd[body_a] = wp.spatial_vector(lin_a, ang_a)
+
+                if body_b >= 0:
+                    qd_b = body_qd[body_b]
+                    lin_b = wp.spatial_top(qd_b) + inv_mass_b * impulse_t
+                    ang_b = wp.spatial_bottom(qd_b) + inv_inertia_b_world * wp.cross(r_b, impulse_t)
+                    body_qd[body_b] = wp.spatial_vector(lin_b, ang_b)
 
 
 class SolverExercise3RigidBody(SolverBase):

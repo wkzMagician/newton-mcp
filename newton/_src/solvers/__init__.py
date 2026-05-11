@@ -28,6 +28,7 @@ from .ca_exercises import SolverExercise2ConstraintWire
 from .ca_exercises import SolverExercise2ConstraintPendulum
 from .ca_exercises import SolverExercise3RigidBody
 from .ca_exercises import SolverExercise4Cloth
+from .ca_exercises import SolverExercise5Fluid
 
 __all__ = [
     "SolverBase",
@@ -45,4 +46,5 @@ __all__ = [
     "SolverExercise2ConstraintPendulum",
     "SolverExercise3RigidBody",
     "SolverExercise4Cloth",
+    "SolverExercise5Fluid",
 ]
