@@ -10,6 +10,7 @@ newton.viewer
    :nosignatures:
 
    ViewerFile
+   ViewerFluidGL
    ViewerGL
    ViewerNull
    ViewerRerun

@@ -57,6 +57,7 @@ class SolverExercise2ConstraintWire(SolverBase):
 
     def reset(self):
         # TODO: reset any additional attributes you added in the constructor here
+        pass
 
     @override
     def step(

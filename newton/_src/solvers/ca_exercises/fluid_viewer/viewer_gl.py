@@ -1,17 +1,17 @@
 from __future__ import annotations
 
+import ctypes
 import time
 from collections.abc import Callable
 from typing import Any
 
+import numpy as np
 import warp as wp
 
 import newton.examples
 import newton.viewer
-from newton.viewer import ViewerGL
-import ctypes
 
-import numpy as np
+from ....viewer import ViewerGL
 
 SSFR_RADIUS_SCALE = 1.35
 SSFR_DEPTH_BLUR_RADIUS = 5
@@ -783,7 +783,7 @@ class FluidViewerGL(ViewerGL):
         super().__init__(width=width, height=height, vsync=vsync, headless=headless)
         self._post_render_callbacks: list[Callable[[FluidViewerGL], None]] = []
 
-    def register_post_render_callback(self, callback: Callable[["FluidViewerGL"], None]):
+    def register_post_render_callback(self, callback: Callable[[FluidViewerGL], None]):
         """Register a callback executed after scene rendering and before UI/present."""
         if not callable(callback):
             raise TypeError("callback must be callable")

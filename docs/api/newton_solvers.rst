@@ -114,7 +114,16 @@ Supported Features
    :nosignatures:
 
    SolverBase
+   SolverExercise1ODECannonBall
+   SolverExercise1ODESpring
+   SolverExercise2ConstraintPendulum
+   SolverExercise2ConstraintWire
+   SolverExercise3RigidBody
+   SolverExercise4Cloth
+   SolverExercise5Fluid
    SolverFeatherstone
+   SolverFluidAPIC
+   SolverFluidSmoke
    SolverImplicitMPM
    SolverMuJoCo
    SolverNotifyFlags

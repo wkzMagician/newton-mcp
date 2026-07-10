@@ -3,6 +3,6 @@
 
 """Agent-facing scene authoring framework built on Newton."""
 
-from .scene import Scene, SceneStore
+from .scene import Scene, SceneExecutorLocal, SceneStore
 
-__all__ = ["Scene", "SceneStore"]
+__all__ = ["Scene", "SceneExecutorLocal", "SceneStore"]

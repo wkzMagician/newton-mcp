@@ -13,8 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .ca_exercises import (
+    SolverExercise1ODECannonBall,
+    SolverExercise1ODESpring,
+    SolverExercise2ConstraintPendulum,
+    SolverExercise2ConstraintWire,
+    SolverExercise3RigidBody,
+    SolverExercise4Cloth,
+    SolverExercise5Fluid,
+)
 from .featherstone import SolverFeatherstone
 from .flags import SolverNotifyFlags
+from .fluid import SolverFluidAPIC, SolverFluidSmoke
 from .implicit_mpm import SolverImplicitMPM
 from .mujoco import SolverMuJoCo
 from .semi_implicit import SolverSemiImplicit
@@ -22,17 +32,19 @@ from .solver import SolverBase
 from .style3d.solver_style3d import SolverStyle3D
 from .vbd import SolverVBD
 from .xpbd import SolverXPBD
-from .ca_exercises import SolverExercise1ODECannonBall
-from .ca_exercises import SolverExercise1ODESpring
-from .ca_exercises import SolverExercise2ConstraintWire
-from .ca_exercises import SolverExercise2ConstraintPendulum
-from .ca_exercises import SolverExercise3RigidBody
-from .ca_exercises import SolverExercise4Cloth
-from .ca_exercises import SolverExercise5Fluid
 
 __all__ = [
     "SolverBase",
+    "SolverExercise1ODECannonBall",
+    "SolverExercise1ODESpring",
+    "SolverExercise2ConstraintPendulum",
+    "SolverExercise2ConstraintWire",
+    "SolverExercise3RigidBody",
+    "SolverExercise4Cloth",
+    "SolverExercise5Fluid",
     "SolverFeatherstone",
+    "SolverFluidAPIC",
+    "SolverFluidSmoke",
     "SolverImplicitMPM",
     "SolverMuJoCo",
     "SolverNotifyFlags",
@@ -40,11 +52,4 @@ __all__ = [
     "SolverStyle3D",
     "SolverVBD",
     "SolverXPBD",
-    "SolverExercise1ODECannonBall",
-    "SolverExercise1ODESpring",
-    "SolverExercise2ConstraintWire",
-    "SolverExercise2ConstraintPendulum",
-    "SolverExercise3RigidBody",
-    "SolverExercise4Cloth",
-    "SolverExercise5Fluid",
 ]
