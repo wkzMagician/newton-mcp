@@ -4,6 +4,23 @@
 
 This repository contains the code for the computer animation exercise. The code uses [Newton@2a6df66](https://github.com/newton-physics/newton/tree/2a6df66595c05d655876a972df06ef810816a7bc) as a backend for the physics simulation.
 
+## Agent scene framework
+
+The repository also contains an initial framework for generating animations from language prompts:
+
+- `ca_framework.scene` defines a backend-neutral, JSON-serializable scene model for rigid bodies, cloth, fluids, constraints, and external fields.
+- `ca_framework.mcp` provides protocol-independent scene editing tools.
+- `mcp_server` exposes those tools through the official Python MCP SDK as a standalone stdio or Streamable HTTP server.
+- `knowledge/skills` contains focused simulation knowledge that an agent can load when translating a prompt into a scene.
+
+Start the stdio MCP server from the repository root:
+
+```bash
+uv run --project mcp_server ca-scene-mcp
+```
+
+Scene files are stored in `.ca-scenes` by default. Set `CA_SCENE_WORKSPACE` to use another directory. The editing and JSON export paths are functional; Newton scene compilation, simulation, and viewer rendering are explicit extension points in `SceneExecutorLocal`.
+
 ## Installation
 
 1. Install **Git** and [**uv**](https://docs.astral.sh/uv/getting-started/installation/) on your system.
@@ -11,7 +28,7 @@ This repository contains the code for the computer animation exercise. The code 
    ```powershell
    powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
    ```
-2. Clone this respository:
+2. Clone this repository:
    ```bash
    git clone http://dalab.se.sjtu.edu.cn/gitlab/courses/ca-framework-2026.git
    ```
@@ -24,7 +41,7 @@ This repository contains the code for the computer animation exercise. The code 
    ./.venv/Scripts/activate
    ```
    
-5. Then run the python script in the ternimal: 
+5. Then run the python script in the terminal:
 
    ```bash
    python ./newton/examples/ca_exercises/exercise2_xxx_xxx.py

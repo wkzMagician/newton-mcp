@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ca-scene-mcp-server"
+version = "0.1.0"
+description = "Standalone MCP server for editing Newton animation scenes"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.12,<2",
+    "newton",
+]
+
+[project.scripts]
+ca-scene-mcp = "ca_mcp_server.server:main"
+
+[tool.uv.sources]
+newton = { path = "..", editable = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ca_mcp_server"]

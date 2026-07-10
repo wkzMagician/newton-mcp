@@ -124,7 +124,7 @@ notebook = [
 path = "newton/_version.py"
 
 [tool.hatch.build.targets.wheel]
-include = ["/newton", "/newton/licenses"]
+include = ["/ca_framework", "/newton", "/newton/licenses"]
 
 [[tool.uv.index]]
 url = "https://pypi.org/simple"
