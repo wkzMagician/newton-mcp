@@ -840,6 +840,8 @@ class SceneExecutorLocal:
                     viewer.log_state(compiled.state_0)
                     viewer.end_frame()
                     image = viewer.get_frame().numpy()
+                    if not np.any(image):
+                        return False
                     if any(not renderer.available for renderer in liquid_renderers.values()):
                         return False
                     path = output_dir / f"frame-{render_index:06d}.ppm"
