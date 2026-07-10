@@ -7,8 +7,8 @@ from itertools import pairwise
 
 import numpy as np
 
-from ca_framework import canonical_scenes
 from ca_framework.scene import SceneExecutorLocal, validate_scene
+from evaluation.canonical import canonical_scenes
 
 
 @lru_cache(maxsize=10)

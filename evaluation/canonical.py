@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Canonical prompt-derived scenes used for end-to-end acceptance."""
+"""Private canonical scenes used only for end-to-end evaluation."""
 
 from __future__ import annotations
 
 import math
 
-from .scene import Scene
+from ca_framework.scene import Scene
 
 
 def _quat_y(angle: float) -> list[float]:

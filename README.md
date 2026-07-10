@@ -13,6 +13,11 @@ The repository also contains a prompt-driven framework for generating animations
 - `mcp_server` exposes those tools through the official Python MCP SDK as a standalone stdio or Streamable HTTP server.
 - `knowledge/skills` contains focused simulation knowledge that an agent can load when translating a prompt into a scene.
 
+The runtime and agent-facing files intentionally contain no reference scenes or
+reference answers. The ten canonical acceptance cases, their assertions, and
+benchmark commands live under `evaluation/`; do not expose that directory to an
+agent during a prompt-to-video experiment.
+
 Start the stdio MCP server from the repository root:
 
 ```bash
@@ -20,6 +25,9 @@ uv run --project mcp_server ca-scene-mcp
 ```
 
 Scene files are stored in `.ca-scenes` by default. Set `CA_SCENE_WORKSPACE` to use another directory. `SceneExecutorLocal` compiles rigid bodies and cloth to Newton XPBD/VBD, advances smoke and APIC/FLIP fluid routes, caches every simulated frame, and renders an output bundle. Final jobs use `run_scene(scene_name, output_dir)` and write `animation.mp4`, `scene.json`, `program.py`, `metrics.json`, `diagnostics.jsonl`, and `cache/`.
+
+Development tests remain under `tests/`. Evaluation assets and instructions are
+documented separately in `evaluation/README.md`.
 
 ## Installation
 

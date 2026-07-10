@@ -73,3 +73,7 @@ docs/_static/viser/
 # Notebook checkpoints
 **/*.ipynb_checkpoints/
 .ca-scenes/
+
+# Prompt-to-video evaluation outputs and isolated agent workspaces
+/evaluation/results/
+/evaluation/workspaces/
