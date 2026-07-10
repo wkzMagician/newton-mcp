@@ -63,21 +63,67 @@ def pendulum_kernel(
     radius1: float,
     radius2: float,
     gravity: wp.vec3,
-    dt: float
+    dt: float,
+    ks: float,
+    kd: float,
 ):
     if wp.tid() != 0:
         return
 
-    # TODO: Implement the pendulum constraint here
-    # You can refer to the bead-on-wire kernel for some guidance
-    # Hints:
-    #   1. Body1 is at index 0, Body2 is at index 1. We do not have to calculate for
-    #      each body, so only execute the kernel for tid() == 0
-    #   2. You can set the mass of the bodies to 1.0 for simplicity
-    #   3. The operator of matrix multiplication in Warp & Python is `@`, e.g. `C = A @ B`,
-    #      as long as the shapes are compatible. Vector is columnar, e.g. vec3 is a 3x1 matrix
-    #   4. You can use the classes and functions defined above, or implement your own 
-    #      linear algebra utilities if you prefer
+    x1 = body_q_in[0]
+    x2 = body_q_in[1]
+    qd1 = body_qd_in[0]
+    qd2 = body_qd_in[1]
+
+    p1 = x1.p
+    p2 = x2.p
+    v1 = wp.vec3(qd1[0], qd1[1], qd1[2])
+    v2 = wp.vec3(qd2[0], qd2[1], qd2[2])
+
+    r1 = p1 - origin
+    r12 = p1 - p2
+    v12 = v1 - v2
+
+    C = wp.vec2(
+        0.5 * (wp.dot(r1, r1) - radius1 * radius1),
+        0.5 * (wp.dot(r12, r12) - radius2 * radius2),
+    )
+    Cdot = wp.vec2(
+        wp.dot(r1, v1),
+        wp.dot(r12, v12),
+    )
+
+    qd = vec6(v1[0], v1[1], v1[2], v2[0], v2[1], v2[2])
+    f = vec6(gravity[0], gravity[1], gravity[2], gravity[0], gravity[1], gravity[2])
+
+    J = mat26(
+        r1[0],  r1[1],  r1[2],  0.0,    0.0,    0.0,
+        r12[0], r12[1], r12[2], -r12[0], -r12[1], -r12[2],
+    )
+    Jdot = mat26(
+        v1[0],  v1[1],  v1[2],  0.0,    0.0,    0.0,
+        v12[0], v12[1], v12[2], -v12[0], -v12[1], -v12[2],
+    )
+
+    A = J @ wp.transpose(J)
+    rhs = -(Jdot @ qd + J @ f) - (kd * Cdot + ks * C) # feedback
+    lagrange = ldlt(A, rhs)
+
+    f_tilde = wp.transpose(J) @ lagrange
+    f1 = wp.vec3(f_tilde[0], f_tilde[1], f_tilde[2])
+    f2 = wp.vec3(f_tilde[3], f_tilde[4], f_tilde[5])
+
+    a1 = gravity + f1
+    a2 = gravity + f2
+    v1_new = v1 + a1 * dt
+    v2_new = v2 + a2 * dt
+    p1_new = p1 + v1_new * dt
+    p2_new = p2 + v2_new * dt
+
+    body_q_out[0] = wp.transform(p=p1_new, q=x1.q)
+    body_q_out[1] = wp.transform(p=p2_new, q=x2.q)
+    body_qd_out[0] = wp.spatial_vector(v1_new, wp.vec3(qd1[3], qd1[4], qd1[5]))
+    body_qd_out[1] = wp.spatial_vector(v2_new, wp.vec3(qd2[3], qd2[4], qd2[5]))
 
 
 class SolverExercise2ConstraintPendulum(SolverBase):
@@ -89,10 +135,10 @@ class SolverExercise2ConstraintPendulum(SolverBase):
         self.radius2 = 5.0
 
         self.gravity = -9.81
+        self.ks = 40.0
+        self.kd = 10.0
 
     def reset(self):
-        # TODO: reset any additional attributes you added in the constructor here
-        
         pass
 
     @override
@@ -112,5 +158,7 @@ class SolverExercise2ConstraintPendulum(SolverBase):
                 self.radius2,
                 self.gravity * wp.vec3(0.0, 0.0, 1.0),
                 dt,
+                self.ks,
+                self.kd,
             ],
         )

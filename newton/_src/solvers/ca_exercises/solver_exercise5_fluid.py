@@ -11,6 +11,7 @@ from ..solver import SolverBase
 # Kernels
 # ---------------------------------------------------------------------------
 
+# 在烟源区域内持续写入密度，用来生成烟雾；如果该网格是固体则不写入。
 
 @wp.kernel
 def apply_density_source_kernel(
@@ -73,6 +74,7 @@ def sample_centered_clamped(
     c1 = c01 * (1.0 - ty) + c11 * ty
     return c0 * (1.0 - tz) + c1 * tz
 
+# 存在 cell 的面上
 
 @wp.func
 def velocity_at_cell_center(
@@ -89,6 +91,8 @@ def velocity_at_cell_center(
     return wp.vec3(ux, vy, wz)
 
 
+# 根据障碍物盒子的范围，把对应的中心网格标记为固体单元。
+
 @wp.kernel
 def fill_solid_box_kernel(
     solid: wp.array3d(dtype=wp.int32),
@@ -96,10 +100,19 @@ def fill_solid_box_kernel(
     box_max: wp.vec3i,
 ):
     i, j, k = wp.tid()
-    
-    # TODO
-    # Fill the solid array with 1s inside the box defined by box_min and box_max.
 
+    if (
+        i >= box_min[0]
+        and i < box_max[0]
+        and j >= box_min[1]
+        and j < box_max[1]
+        and k >= box_min[2]
+        and k < box_max[2]
+    ):
+        solid[i, j, k] = 1
+
+
+# 根据相邻单元的烟雾密度，在 z 方向速度面上加入向上的浮力。
 
 @wp.kernel
 def add_buoyancy_kernel(
@@ -115,11 +128,22 @@ def add_buoyancy_kernel(
     
     i, j, k = wp.tid()
 
-    # TODO
     # w lives on z-faces, shape (nx, ny, nz+1). w[i, j, k] sits between
     # cell (i, j, k-1) and (i, j, k). Newton's world is Z-up, so buoyancy
     # pushes the z-face velocity.
+    if k == 0 or k == nz:
+        w[i, j, k] = 0.0
+        return
 
+    if solid[i, j, k - 1] != 0 or solid[i, j, k] != 0:
+        w[i, j, k] = 0.0
+        return
+
+    rho = 0.5 * (density[i, j, k - 1] + density[i, j, k])
+    w[i, j, k] = w[i, j, k] + buoyancy_scale * rho * dt
+
+
+# 在 y 方向速度面上加入风力，并跳过边界和固体相邻的速度面。
 
 @wp.kernel
 def add_wind_kernel(
@@ -133,8 +157,19 @@ def add_wind_kernel(
 ):
     i, j, k = wp.tid()
 
-    # TODO: v lives on y-faces, shape (nx, ny+1, nz).
+    # v lives on y-faces, shape (nx, ny+1, nz).
+    if j == 0 or j == ny:
+        v[i, j, k] = 0.0
+        return
 
+    if solid[i, j - 1, k] != 0 or solid[i, j, k] != 0:
+        v[i, j, k] = 0.0
+        return
+
+    v[i, j, k] = v[i, j, k] + wind_force * dt
+
+
+# 处理 x 方向速度的边界条件：外边界和固体相邻面上的法向速度置零。
 
 @wp.kernel
 def enforce_solid_velocity_u_kernel(
@@ -145,9 +180,16 @@ def enforce_solid_velocity_u_kernel(
     nz: int,
 ):
     i, j, k = wp.tid()
-    
-    # TODO: Enforce solid boundary conditions on the x-face velocity u.
 
+    if i == 0 or i == nx:
+        u[i, j, k] = 0.0
+        return
+
+    if solid[i - 1, j, k] != 0 or solid[i, j, k] != 0:
+        u[i, j, k] = 0.0
+
+
+# 处理 y 方向速度的边界条件：外边界和固体相邻面上的法向速度置零。
 
 @wp.kernel
 def enforce_solid_velocity_v_kernel(
@@ -158,9 +200,16 @@ def enforce_solid_velocity_v_kernel(
     nz: int,
 ):
     i, j, k = wp.tid()
-    
-    # TODO: Enforce solid boundary conditions on the y-face velocity v.
 
+    if j == 0 or j == ny:
+        v[i, j, k] = 0.0
+        return
+
+    if solid[i, j - 1, k] != 0 or solid[i, j, k] != 0:
+        v[i, j, k] = 0.0
+
+
+# 处理 z 方向速度的边界条件：外边界和固体相邻面上的法向速度置零。
 
 @wp.kernel
 def enforce_solid_velocity_w_kernel(
@@ -171,9 +220,16 @@ def enforce_solid_velocity_w_kernel(
     nz: int,
 ):
     i, j, k = wp.tid()
-    
-    # TODO: Enforce solid boundary conditions on the z-face velocity w. 
 
+    if k == 0 or k == nz:
+        w[i, j, k] = 0.0
+        return
+
+    if solid[i, j, k - 1] != 0 or solid[i, j, k] != 0:
+        w[i, j, k] = 0.0
+
+
+# 在每个流体单元中心计算 MAC 网格速度场的散度，供压力投影使用。
 
 @wp.kernel
 def compute_divergence_kernel(
@@ -185,9 +241,19 @@ def compute_divergence_kernel(
     divergence: wp.array3d(dtype=float),
 ):
     i, j, k = wp.tid()
-    
-    # TODO: Compute the divergence of the velocity field at cell (i, j, k)
 
+    if solid[i, j, k] != 0:
+        divergence[i, j, k] = 0.0
+        return
+
+    divergence[i, j, k] = (
+        (u[i + 1, j, k] - u[i, j, k])
+        + (v[i, j + 1, k] - v[i, j, k])
+        + (w[i, j, k + 1] - w[i, j, k])
+    ) * inv_dx
+
+
+# 执行一次红黑 Gauss-Seidel 压力迭代，只更新指定奇偶性的流体单元。
 
 @wp.kernel
 def gauss_seidel_rb_step_kernel(
@@ -203,11 +269,43 @@ def gauss_seidel_rb_step_kernel(
 ):
     i, j, k = wp.tid()
 
-    # TODO: Perform one red-black Gauss-Seidel iteration to solve the pressure Poisson equation.
-    # Red-black Gauss-Seidel: updates only cells whose (i + j + k) parity matches
-    # ``parity`` (0 = red, 1 = black), so all cells touched in this launch read
-    # from neighbours of the opposite colour and can run in parallel.
+    # Red-black Gauss-Seidel: update only one parity per launch.
+    if ((i + j + k) & 1) != parity:
+        return
 
+    if solid[i, j, k] != 0:
+        pressure[i, j, k] = 0.0
+        return
+
+    diag = 0.0
+    neighbour_sum = 0.0
+
+    if i > 0 and solid[i - 1, j, k] == 0:
+        diag = diag + 1.0
+        neighbour_sum = neighbour_sum + pressure[i - 1, j, k]
+    if i < nx - 1 and solid[i + 1, j, k] == 0:
+        diag = diag + 1.0
+        neighbour_sum = neighbour_sum + pressure[i + 1, j, k]
+    if j > 0 and solid[i, j - 1, k] == 0:
+        diag = diag + 1.0
+        neighbour_sum = neighbour_sum + pressure[i, j - 1, k]
+    if j < ny - 1 and solid[i, j + 1, k] == 0:
+        diag = diag + 1.0
+        neighbour_sum = neighbour_sum + pressure[i, j + 1, k]
+    if k > 0 and solid[i, j, k - 1] == 0:
+        diag = diag + 1.0
+        neighbour_sum = neighbour_sum + pressure[i, j, k - 1]
+    if k < nz - 1 and solid[i, j, k + 1] == 0:
+        diag = diag + 1.0
+        neighbour_sum = neighbour_sum + pressure[i, j, k + 1]
+
+    if diag > 0.0:
+        pressure[i, j, k] = (neighbour_sum - (dx * dx / dt) * divergence[i, j, k]) / diag
+    else:
+        pressure[i, j, k] = 0.0
+
+
+# 用相邻单元的压力差修正 x 方向面速度，使速度场趋于无散。
 
 @wp.kernel
 def project_velocity_u_kernel(
@@ -221,9 +319,19 @@ def project_velocity_u_kernel(
     nz: int,
 ):
     i, j, k = wp.tid()
-    
-    # TODO: Project the x-face velocity u by subtracting the pressure gradient.
 
+    if i == 0 or i == nx:
+        u[i, j, k] = 0.0
+        return
+
+    if solid[i - 1, j, k] != 0 or solid[i, j, k] != 0:
+        u[i, j, k] = 0.0
+        return
+
+    u[i, j, k] = u[i, j, k] - dt * (pressure[i, j, k] - pressure[i - 1, j, k]) * inv_dx
+
+
+# 用相邻单元的压力差修正 y 方向面速度，使速度场趋于无散。
 
 @wp.kernel
 def project_velocity_v_kernel(
@@ -237,9 +345,19 @@ def project_velocity_v_kernel(
     nz: int,
 ):
     i, j, k = wp.tid()
-    
-    # TODO: Project the y-face velocity v by subtracting the pressure gradient.
 
+    if j == 0 or j == ny:
+        v[i, j, k] = 0.0
+        return
+
+    if solid[i, j - 1, k] != 0 or solid[i, j, k] != 0:
+        v[i, j, k] = 0.0
+        return
+
+    v[i, j, k] = v[i, j, k] - dt * (pressure[i, j, k] - pressure[i, j - 1, k]) * inv_dx
+
+
+# 用相邻单元的压力差修正 z 方向面速度，使速度场趋于无散。
 
 @wp.kernel
 def project_velocity_w_kernel(
@@ -253,9 +371,19 @@ def project_velocity_w_kernel(
     nz: int,
 ):
     i, j, k = wp.tid()
-    
-    # TODO: Project the z-face velocity w by subtracting the pressure gradient.
 
+    if k == 0 or k == nz:
+        w[i, j, k] = 0.0
+        return
+
+    if solid[i, j, k - 1] != 0 or solid[i, j, k] != 0:
+        w[i, j, k] = 0.0
+        return
+
+    w[i, j, k] = w[i, j, k] - dt * (pressure[i, j, k] - pressure[i, j, k - 1]) * inv_dx
+
+
+# 对中心存储的烟雾密度做半拉格朗日回溯采样，得到下一步密度场。
 
 @wp.kernel
 def advect_density_kernel(
@@ -273,8 +401,30 @@ def advect_density_kernel(
 ):
     i, j, k = wp.tid()
 
-    # TODO: Advect density via semi-Lagrangian backtrace.
+    if solid[i, j, k] != 0:
+        density_out[i, j, k] = 0.0
+        return
 
+    vel = velocity_at_cell_center(u, v, w, i, j, k)
+    x = float(i) + 0.5
+    y = float(j) + 0.5
+    z = float(k) + 0.5
+    bx = x - dt * inv_dx * vel[0]
+    by = y - dt * inv_dx * vel[1]
+    bz = z - dt * inv_dx * vel[2]
+
+    density_out[i, j, k] = sample_centered_clamped(
+        density,
+        bx - 0.5,
+        by - 0.5,
+        bz - 0.5,
+        nx,
+        ny,
+        nz,
+    )
+
+
+# 对 x 方向面速度做半拉格朗日自平流，并保持边界和固体面速度为零。
 
 @wp.kernel
 def advect_velocity_u_kernel(
@@ -291,8 +441,28 @@ def advect_velocity_u_kernel(
 ):
     i, j, k = wp.tid()
 
-    # TODO: Advect the x-face velocity u via semi-Lagrangian backtrace.
+    if i == 0 or i == nx:
+        u_out[i, j, k] = 0.0
+        return
 
+    if solid[i - 1, j, k] != 0 or solid[i, j, k] != 0:
+        u_out[i, j, k] = 0.0
+        return
+
+    x = float(i)
+    y = float(j) + 0.5
+    z = float(k) + 0.5
+    ux = sample_centered_clamped(u_in, x, y - 0.5, z - 0.5, nx + 1, ny, nz)
+    vy = sample_centered_clamped(v_in, x - 0.5, y, z - 0.5, nx, ny + 1, nz)
+    wz = sample_centered_clamped(w_in, x - 0.5, y - 0.5, z, nx, ny, nz + 1)
+    bx = x - dt * inv_dx * ux
+    by = y - dt * inv_dx * vy
+    bz = z - dt * inv_dx * wz
+
+    u_out[i, j, k] = sample_centered_clamped(u_in, bx, by - 0.5, bz - 0.5, nx + 1, ny, nz)
+
+
+# 对 y 方向面速度做半拉格朗日自平流，并保持边界和固体面速度为零。
 
 @wp.kernel
 def advect_velocity_v_kernel(
@@ -309,8 +479,28 @@ def advect_velocity_v_kernel(
 ):
     i, j, k = wp.tid()
 
-    # TODO: Advect the y-face velocity v via semi-Lagrangian backtrace.
+    if j == 0 or j == ny:
+        v_out[i, j, k] = 0.0
+        return
 
+    if solid[i, j - 1, k] != 0 or solid[i, j, k] != 0:
+        v_out[i, j, k] = 0.0
+        return
+
+    x = float(i) + 0.5
+    y = float(j)
+    z = float(k) + 0.5
+    ux = sample_centered_clamped(u_in, x, y - 0.5, z - 0.5, nx + 1, ny, nz)
+    vy = sample_centered_clamped(v_in, x - 0.5, y, z - 0.5, nx, ny + 1, nz)
+    wz = sample_centered_clamped(w_in, x - 0.5, y - 0.5, z, nx, ny, nz + 1)
+    bx = x - dt * inv_dx * ux
+    by = y - dt * inv_dx * vy
+    bz = z - dt * inv_dx * wz
+
+    v_out[i, j, k] = sample_centered_clamped(v_in, bx - 0.5, by, bz - 0.5, nx, ny + 1, nz)
+
+
+# 对 z 方向面速度做半拉格朗日自平流，并保持边界和固体面速度为零。
 
 @wp.kernel
 def advect_velocity_w_kernel(
@@ -327,7 +517,25 @@ def advect_velocity_w_kernel(
 ):
     i, j, k = wp.tid()
 
-    # TODO: Advect the z-face velocity w via semi-Lagrangian backtrace.
+    if k == 0 or k == nz:
+        w_out[i, j, k] = 0.0
+        return
+
+    if solid[i, j, k - 1] != 0 or solid[i, j, k] != 0:
+        w_out[i, j, k] = 0.0
+        return
+
+    x = float(i) + 0.5
+    y = float(j) + 0.5
+    z = float(k)
+    ux = sample_centered_clamped(u_in, x, y - 0.5, z - 0.5, nx + 1, ny, nz)
+    vy = sample_centered_clamped(v_in, x - 0.5, y, z - 0.5, nx, ny + 1, nz)
+    wz = sample_centered_clamped(w_in, x - 0.5, y - 0.5, z, nx, ny, nz + 1)
+    bx = x - dt * inv_dx * ux
+    by = y - dt * inv_dx * vy
+    bz = z - dt * inv_dx * wz
+
+    w_out[i, j, k] = sample_centered_clamped(w_in, bx - 0.5, by - 0.5, bz, nx, ny, nz + 1)
 
 
 # ---------------------------------------------------------------------------

@@ -23,9 +23,24 @@ def bead_on_wire_kernel(
     p = x.p
     lin_v = wp.vec3(v[0], v[1], v[2])
 
-    # TODO: Implement the bead on wire constraint here
-    p_new = p
-    lin_v_new = lin_v
+    radial = p - origin
+    lagrange = -(wp.dot(gravity, radial) + wp.dot(lin_v, lin_v)) / wp.dot(radial, radial)
+    accel = gravity + lagrange * radial
+    
+    lin_v_new = lin_v + accel * dt
+    p_new = p + lin_v_new * dt
+    
+    # position-based fix
+    radial_new = p_new - origin
+    radial_len = wp.length(radial_new)
+    eps = 1e-6
+    if radial_len > eps:
+        # 先把位置投影回圆周
+        n = radial_new / radial_len
+        p_new = origin + n * radius
+
+        # 再把速度投影到切向方向：去掉径向分量
+        lin_v_new = lin_v_new - wp.dot(lin_v_new, n) * n
 
     # Update the output state
     body_q_out[i] = wp.transform(p=p_new, q=x.q)
@@ -42,8 +57,6 @@ class SolverExercise2ConstraintWire(SolverBase):
 
     def reset(self):
         # TODO: reset any additional attributes you added in the constructor here
-        
-        pass
 
     @override
     def step(
