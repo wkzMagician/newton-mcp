@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .model import ObjectContainer, Scene
+from .model import ObjectCloth, ObjectContainer, Scene, VertexSelector
 from .validation import select_pipeline, validate_scene
 
 
@@ -21,6 +21,8 @@ class CompiledScene:
     scene: Scene
     pipeline: list[str]
     container_colliders: dict[str, list[dict[str, Any]]]
+    cloth_particle_indices: dict[str, list[int]]
+    pinned_particles: dict[str, list[int]]
 
 
 class SceneCompilerNewton:
@@ -36,7 +38,26 @@ class SceneCompilerNewton:
             for item in scene.objects.values()
             if isinstance(item, ObjectContainer)
         }
-        return CompiledScene(scene=scene, pipeline=select_pipeline(scene), container_colliders=containers)
+        cloth_indices: dict[str, list[int]] = {}
+        pinned: dict[str, list[int]] = {}
+        particle_start = 0
+        for item in scene.objects.values():
+            if not isinstance(item, ObjectCloth):
+                continue
+            count = item.resolution[0] * item.resolution[1]
+            cloth_indices[item.id] = list(range(particle_start, particle_start + count))
+            local_pins = {
+                index for selector in item.pinned for index in self._selector_indices(selector, item.resolution)
+            }
+            pinned[item.id] = [particle_start + index for index in sorted(local_pins)]
+            particle_start += count
+        return CompiledScene(
+            scene=scene,
+            pipeline=select_pipeline(scene),
+            container_colliders=containers,
+            cloth_particle_indices=cloth_indices,
+            pinned_particles=pinned,
+        )
 
     def export_program(self, scene: Scene, output: str | Path) -> Path:
         """Write a standalone Python program embedding the exact scene IR."""
@@ -66,10 +87,57 @@ if __name__ == "__main__":
     def _container_shapes(container: ObjectContainer) -> list[dict[str, Any]]:
         x, y, z = container.inner_size
         t = container.wall_thickness
-        return [
+        local = [
             {"kind": "box", "size": (x + 2 * t, y + 2 * t, t), "position": (0.0, 0.0, -t / 2)},
             {"kind": "box", "size": (t, y + 2 * t, z), "position": (-(x + t) / 2, 0.0, z / 2)},
             {"kind": "box", "size": (t, y + 2 * t, z), "position": ((x + t) / 2, 0.0, z / 2)},
             {"kind": "box", "size": (x, t, z), "position": (0.0, -(y + t) / 2, z / 2)},
             {"kind": "box", "size": (x, t, z), "position": (0.0, (y + t) / 2, z / 2)},
         ]
+        result = []
+        for shape in local:
+            scaled_position = tuple(shape["position"][axis] * container.transform.scale[axis] for axis in range(3))
+            rotated_position = SceneCompilerNewton._rotate_vector(scaled_position, container.transform.rotation)
+            result.append(
+                {
+                    **shape,
+                    "size": tuple(shape["size"][axis] * container.transform.scale[axis] for axis in range(3)),
+                    "position": tuple(container.transform.position[axis] + rotated_position[axis] for axis in range(3)),
+                    "rotation": container.transform.rotation,
+                }
+            )
+        return result
+
+    @staticmethod
+    def _selector_indices(selector: VertexSelector, resolution: tuple[int, int]) -> list[int]:
+        """Resolve a selector to stable row-major Newton particle indices."""
+        width, height = resolution
+        if selector.kind == "indices":
+            return list(selector.indices)
+        if selector.kind == "edge":
+            if selector.edge == "bottom":
+                return list(range(width))
+            if selector.edge == "top":
+                return list(range((height - 1) * width, height * width))
+            if selector.edge == "left":
+                return [row * width for row in range(height)]
+            return [row * width + width - 1 for row in range(height)]
+        corners = {
+            "bottom-left": 0,
+            "bottom-right": width - 1,
+            "top-left": (height - 1) * width,
+            "top-right": height * width - 1,
+        }
+        return [corners[name] for name in selector.corners]
+
+    @staticmethod
+    def _rotate_vector(vector: tuple[float, float, float], quaternion: tuple[float, float, float, float]):
+        """Rotate a vector by an ``(x, y, z, w)`` unit quaternion."""
+        x, y, z, w = quaternion
+        vx, vy, vz = vector
+        tx, ty, tz = 2.0 * (y * vz - z * vy), 2.0 * (z * vx - x * vz), 2.0 * (x * vy - y * vx)
+        return (
+            vx + w * tx + y * tz - z * ty,
+            vy + w * ty + z * tx - x * tz,
+            vz + w * tz + x * ty - y * tx,
+        )

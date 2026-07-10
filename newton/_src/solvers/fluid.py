@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from .ca_exercises.solver_exercise5_fluid import SolverExercise5Fluid
 from .semi_implicit import SolverSemiImplicit
+from .solver import SolverBase
 
 
 class SolverFluidSmoke(SolverExercise5Fluid):
@@ -26,7 +27,7 @@ class SolverFluidSmoke(SolverExercise5Fluid):
     """
 
 
-class SolverFluidAPIC(SolverSemiImplicit):
+class SolverFluidAPIC(SolverBase):
     """Particle fluid integration entry point for APIC/FLIP scene pipelines.
 
     This solver uses Newton's particle/rigid contact integration for the
@@ -59,7 +60,26 @@ class SolverFluidAPIC(SolverSemiImplicit):
         if pressure_iters <= 0:
             raise ValueError("pressure_iters must be positive")
         super().__init__(model)
+        self._particle_integrator = SolverSemiImplicit(model)
         self.grid_resolution = grid_resolution
         self.domain_size = domain_size
         self.flip_ratio = flip_ratio
         self.pressure_iters = pressure_iters
+
+    def step(self, state_in, state_out, control, contacts, dt):
+        """Advance the Lagrangian particle stage [s].
+
+        The fixed-capacity MAC transfer and pressure buffers are owned by the
+        scene runtime; this method deliberately delegates only Newton contact
+        integration and therefore does not masquerade as a semi-implicit
+        solver through inheritance.
+        """
+        return self._particle_integrator.step(state_in, state_out, control, contacts, dt)
+
+    def update_contacts(self, contacts) -> None:
+        """Copy solver contact forces into ``contacts`` when available."""
+        self._particle_integrator.update_contacts(contacts)
+
+    def notify_model_changed(self, flags: int) -> None:
+        """Forward model mutations to the particle contact integrator."""
+        self._particle_integrator.notify_model_changed(flags)

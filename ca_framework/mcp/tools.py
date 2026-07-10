@@ -9,7 +9,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -29,6 +29,15 @@ class SceneExecutor(Protocol):
 
     def preview(self, scene: Scene, *, frames: int | None = None) -> dict[str, Any]: ...
 
+    def run(
+        self,
+        scene: Scene,
+        *,
+        output_dir: Path,
+        cancel_event: Event | None = None,
+        progress: dict[str, Any] | None = None,
+    ) -> dict[str, Any]: ...
+
 
 class SceneTools:
     """Safe scene editing operations shared by MCP and local callers."""
@@ -37,7 +46,7 @@ class SceneTools:
         self.store = store
         self.executor = executor
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ca-scene")
-        self._jobs: dict[str, tuple[Future[dict[str, Any]], str]] = {}
+        self._jobs: dict[str, tuple[Future[dict[str, Any]], str, Event, dict[str, Any]]] = {}
         self._jobs_lock = Lock()
 
     def create_scene(self, name: str, overwrite: bool = False) -> dict[str, Any]:
@@ -188,23 +197,31 @@ class SceneTools:
         """Run a short preview and return keyframes and metrics."""
         return self._executor().preview(self.store.load(scene_name), frames=frames)
 
-    def run_scene(self, scene_name: str, output: str) -> dict[str, Any]:
-        """Asynchronously simulate and render a final MP4."""
+    def run_scene(self, scene_name: str, output_dir: str) -> dict[str, Any]:
+        """Asynchronously create a durable simulation and rendering bundle."""
         scene = self.store.load(scene_name)
         job_id = uuid4().hex
-        future = self._pool.submit(self._executor().render, scene, output=Path(output))
+        cancel_event = Event()
+        progress = {"status": "queued", "stage": "queued", "frame": 0, "scene": scene_name}
+        future = self._pool.submit(
+            self._executor().run,
+            scene,
+            output_dir=Path(output_dir),
+            cancel_event=cancel_event,
+            progress=progress,
+        )
         with self._jobs_lock:
-            self._jobs[job_id] = (future, scene_name)
-        return {"job_id": job_id, "status": "queued", "scene": scene_name}
+            self._jobs[job_id] = (future, scene_name, cancel_event, progress)
+        return {"job_id": job_id, **progress, "output_dir": str(Path(output_dir).resolve())}
 
     def get_job(self, job_id: str) -> dict[str, Any]:
         """Return asynchronous job state or result."""
         with self._jobs_lock:
-            future, scene_name = self._jobs[job_id]
+            future, scene_name, _cancel_event, progress = self._jobs[job_id]
         if future.cancelled():
             return {"job_id": job_id, "status": "cancelled", "scene": scene_name}
         if not future.done():
-            return {"job_id": job_id, "status": "running", "scene": scene_name}
+            return {"job_id": job_id, **progress, "scene": scene_name}
         try:
             return {"job_id": job_id, **future.result()}
         except Exception as error:
@@ -218,13 +235,15 @@ class SceneTools:
     def cancel_job(self, job_id: str) -> dict[str, Any]:
         """Cancel a queued job; running native work completes safely."""
         with self._jobs_lock:
-            future, scene_name = self._jobs[job_id]
+            future, scene_name, cancel_event, progress = self._jobs[job_id]
+        cancel_event.set()
         cancelled = future.cancel()
+        progress["status"] = "cancelled" if cancelled else "cancelling"
         return {
             "job_id": job_id,
             "scene": scene_name,
-            "status": "cancelled" if cancelled else "running",
-            "cancelled": cancelled,
+            "status": progress["status"],
+            "cancelled": True,
         }
 
     def export_program(self, scene_name: str, program_output: str, scene_output: str) -> dict[str, Any]:

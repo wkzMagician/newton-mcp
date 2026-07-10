@@ -152,9 +152,9 @@ def preview_scene(scene_name: str, frames: int | None = None) -> dict[str, Any]:
 
 
 @mcp.tool()
-def run_scene(scene_name: str, output: str) -> dict[str, Any]:
-    """Submit final simulation and MP4 rendering asynchronously."""
-    return _tools().run_scene(scene_name, output)
+def run_scene(scene_name: str, output_dir: str) -> dict[str, Any]:
+    """Submit a persistent simulation and rendering bundle asynchronously."""
+    return _tools().run_scene(scene_name, output_dir)
 
 
 @mcp.tool()

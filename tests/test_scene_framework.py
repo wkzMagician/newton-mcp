@@ -9,7 +9,7 @@ from pathlib import Path
 
 from ca_framework.mcp import SceneTools
 from ca_framework.scene import Scene, SceneExecutorLocal, SceneStore, validate_scene
-from newton.solvers import SolverFluidAPIC, SolverFluidSmoke
+from newton.solvers import SolverBase, SolverFluidAPIC, SolverFluidSmoke, SolverSemiImplicit
 from newton.viewer import ViewerFluidGL
 
 
@@ -164,18 +164,80 @@ class TestSceneFramework(unittest.TestCase):
         self.tools.apply_scene_patch(
             "demo", {"settings": {"duration": 0.05}, "render": {"resolution": [16, 16], "fps": 10}}
         )
-        job = self.tools.run_scene("demo", str(self.root / "demo.mp4"))
+        output_dir = self.root / "demo-output"
+        job = self.tools.run_scene("demo", str(output_dir))
         for _ in range(100):
             result = self.tools.get_job(job["job_id"])
             if result["status"] not in {"queued", "running"}:
                 break
             time.sleep(0.01)
         self.assertIn(result["status"], {"completed", "render_failed"})
+        self.assertTrue((output_dir / "scene.json").is_file())
+        self.assertTrue((output_dir / "program.py").is_file())
+        self.assertTrue((output_dir / "metrics.json").is_file())
+        self.assertTrue((output_dir / "diagnostics.jsonl").is_file())
+        self.assertTrue((output_dir / "cache" / "manifest.json").is_file())
 
     def test_public_fluid_api(self):
         self.assertTrue(SolverFluidAPIC.__name__.startswith("SolverFluid"))
         self.assertTrue(SolverFluidSmoke.__name__.startswith("SolverFluid"))
         self.assertEqual(ViewerFluidGL.__name__, "FluidViewerGL")
+        self.assertTrue(issubclass(SolverFluidAPIC, SolverBase))
+        self.assertFalse(issubclass(SolverFluidAPIC, SolverSemiImplicit))
+
+    def test_compiler_resolves_cloth_selectors_and_container_transform(self):
+        scene = Scene.from_dict(
+            {
+                "name": "compiled",
+                "schema_version": 2,
+                "objects": {
+                    "cloth": {
+                        "id": "cloth",
+                        "kind": "cloth",
+                        "resolution": [3, 2],
+                        "pinned": [{"kind": "edge", "edge": "top"}],
+                    },
+                    "container": {
+                        "id": "container",
+                        "kind": "container",
+                        "motion": "static",
+                        "inner_size": [2.0, 2.0, 1.0],
+                        "transform": {"position": [10.0, 0.0, 1.0], "scale": [2.0, 1.0, 1.0]},
+                    },
+                },
+            }
+        )
+        compiled = SceneExecutorLocal().compiler.compile(scene)
+        self.assertEqual(compiled.cloth_particle_indices["cloth"], list(range(6)))
+        self.assertEqual(compiled.pinned_particles["cloth"], [3, 4, 5])
+        self.assertAlmostEqual(compiled.container_colliders["container"][0]["position"][0], 10.0)
+
+    def test_validation_rejects_bad_quaternion_selector_and_times(self):
+        scene = Scene.from_dict(
+            {
+                "name": "invalid",
+                "schema_version": 2,
+                "objects": {
+                    "cloth": {
+                        "id": "cloth",
+                        "kind": "cloth",
+                        "resolution": [2, 2],
+                        "transform": {"rotation": [0.0, 0.0, 0.0, 2.0]},
+                        "pinned": [{"kind": "indices", "indices": [4]}],
+                    }
+                },
+                "actions": {
+                    "move": {
+                        "id": "move",
+                        "kind": "transform",
+                        "object_id": "cloth",
+                        "keyframes": [],
+                    }
+                },
+            }
+        )
+        codes = {item["code"] for item in validate_scene(scene)["diagnostics"]}
+        self.assertTrue({"invalid_quaternion", "invalid_selector", "invalid_action_time"} <= codes)
 
 
 if __name__ == "__main__":

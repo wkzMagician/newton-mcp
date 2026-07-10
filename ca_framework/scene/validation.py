@@ -6,10 +6,22 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from math import prod
+from itertools import pairwise
+from math import isfinite, prod, sqrt
 from typing import Any, Literal
 
-from .model import ObjectCloth, ObjectContainer, ObjectFluid, ObjectRigid, Scene
+from .model import (
+    ActionEmit,
+    ActionForce,
+    ActionImpulse,
+    ActionTransform,
+    ObjectCloth,
+    ObjectContainer,
+    ObjectFluid,
+    ObjectRigid,
+    Scene,
+    VertexSelector,
+)
 
 
 @dataclass(slots=True)
@@ -34,11 +46,15 @@ def estimate_resources(scene: Scene) -> dict[str, int]:
             grid_cells += prod(item.grid_resolution)
             if item.phase == "liquid" and item.particle_spacing > 0.0:
                 particles += prod(max(1, int(size / item.particle_spacing)) for size in item.size)
+    # MAC smoke/APIC grids store several scalar grids plus three face grids.
+    # This deliberately overestimates rather than allowing jobs to OOM late.
+    estimated_bytes = particles * 64 + grid_cells * 64
     return {
         "particles": particles,
         "grid_cells": grid_cells,
         "simulation_frames": round(scene.settings.duration * scene.settings.fps),
         "render_frames": round(scene.settings.duration * scene.render.fps),
+        "estimated_memory_bytes": estimated_bytes,
     }
 
 
@@ -80,6 +96,14 @@ def validate_scene(scene: Scene) -> dict[str, Any]:
                 "Scale components must be positive.",
                 "Use positive dimensionless scale values.",
             )
+        quaternion_norm = sqrt(sum(component * component for component in item.transform.rotation))
+        if not all(isfinite(component) for component in item.transform.rotation) or abs(quaternion_norm - 1.0) > 1.0e-3:
+            error(
+                f"{path}.transform.rotation",
+                "invalid_quaternion",
+                "Rotation must be a finite unit quaternion in (x, y, z, w) order.",
+                "Normalize the quaternion before submitting the scene.",
+            )
         if item.physical_material.density <= 0.0:
             error(
                 f"{path}.physical_material.density",
@@ -118,6 +142,9 @@ def validate_scene(scene: Scene) -> dict[str, Any]:
                     "Cloth dimensions must be positive and resolution at least 2 by 2.",
                     "Increase cloth size or resolution.",
                 )
+            vertex_count = item.resolution[0] * item.resolution[1]
+            for selector_index, selector in enumerate(item.pinned):
+                _validate_selector(selector, vertex_count, f"{path}.pinned.{selector_index}", error)
         elif isinstance(item, ObjectFluid):
             fluid_phases.add(item.phase)
             if any(size <= 0.0 for size in item.size) or any(value < 2 for value in item.grid_resolution):
@@ -134,6 +161,22 @@ def validate_scene(scene: Scene) -> dict[str, Any]:
                     "Liquid particle spacing must be positive.",
                     "Use spacing in metres greater than zero.",
                 )
+            for emitter_index, emitter in enumerate(item.emitters):
+                emitter_path = f"{path}.emitters.{emitter_index}"
+                if emitter.start_time < 0.0 or emitter.end_time < emitter.start_time:
+                    error(
+                        emitter_path,
+                        "invalid_action_time",
+                        "Emitter times must be ordered and non-negative.",
+                        "Use 0 <= start_time <= end_time.",
+                    )
+                if any(value <= 0.0 for value in emitter.size) or emitter.density < 0.0:
+                    error(
+                        emitter_path,
+                        "invalid_emitter",
+                        "Emitter dimensions must be positive and density non-negative.",
+                        "Use a positive emitter size and non-negative density.",
+                    )
 
     for collection_name in ("constraints", "fields", "actions"):
         for key, item in getattr(scene, collection_name).items():
@@ -147,6 +190,65 @@ def validate_scene(scene: Scene) -> dict[str, Any]:
                         "dangling_reference",
                         f"Unknown object id: {object_id}",
                         "Reference an existing scene object.",
+                    )
+
+    for key, action in scene.actions.items():
+        path = f"actions.{key}"
+        if isinstance(action, ActionTransform):
+            times = [keyframe.time for keyframe in action.keyframes]
+            if not times or any(time < 0.0 for time in times) or any(a >= b for a, b in pairwise(times)):
+                error(
+                    f"{path}.keyframes",
+                    "invalid_action_time",
+                    "Transform keyframes must have strictly increasing non-negative times.",
+                    "Sort keyframes and remove duplicate timestamps.",
+                )
+            for index, keyframe in enumerate(action.keyframes):
+                norm = sqrt(sum(value * value for value in keyframe.transform.rotation))
+                if not all(isfinite(value) for value in keyframe.transform.rotation) or abs(norm - 1.0) > 1.0e-3:
+                    error(
+                        f"{path}.keyframes.{index}.transform.rotation",
+                        "invalid_quaternion",
+                        "Keyframe rotation must be a finite unit quaternion.",
+                        "Normalize the quaternion.",
+                    )
+        elif isinstance(action, ActionImpulse):
+            if action.time < 0.0 or action.time > scene.settings.duration:
+                error(path, "invalid_action_time", "Impulse time is outside the scene.", "Move it inside the duration.")
+        elif isinstance(action, (ActionForce, ActionEmit)):
+            if action.start_time < 0.0 or action.end_time < action.start_time:
+                error(
+                    path,
+                    "invalid_action_time",
+                    "Action times must be ordered and non-negative.",
+                    "Use 0 <= start <= end.",
+                )
+        if isinstance(action, ActionEmit):
+            fluid = scene.objects.get(action.object_id)
+            if isinstance(fluid, ObjectFluid) and not 0 <= action.emitter_index < len(fluid.emitters):
+                error(path, "invalid_emitter", "Emitter index is out of range.", "Reference an existing emitter.")
+
+    # Fluids entirely larger than an enclosing container cannot be initialized
+    # without wall penetration. Containers are open at the top, so only X/Y
+    # clearance and the floor-relative height are checked.
+    for fluid_key, fluid in ((key, value) for key, value in scene.objects.items() if isinstance(value, ObjectFluid)):
+        for container_key, container in (
+            (key, value) for key, value in scene.objects.items() if isinstance(value, ObjectContainer)
+        ):
+            if all(
+                abs(fluid.transform.position[axis] - container.transform.position[axis])
+                + fluid.size[axis] * fluid.transform.scale[axis] * 0.5
+                <= container.inner_size[axis] * container.transform.scale[axis] * 0.5
+                for axis in (0, 1)
+            ):
+                fluid_bottom = fluid.transform.position[2] - fluid.size[2] * fluid.transform.scale[2] * 0.5
+                container_floor = container.transform.position[2]
+                if fluid_bottom < container_floor - 1.0e-6:
+                    error(
+                        f"objects.{fluid_key}",
+                        "container_clearance",
+                        f"Fluid starts below the floor of container {container_key!r}.",
+                        "Raise or resize the initial fluid volume.",
                     )
 
     expected = {"smoke": "smoke", "liquid": "apic"}
@@ -207,11 +309,26 @@ def validate_scene(scene: Scene) -> dict[str, Any]:
 def select_pipeline(scene: Scene) -> list[str]:
     """Return the deterministic solver schedule required by a scene."""
     pipeline = []
+    cloth = [item for item in scene.objects.values() if isinstance(item, ObjectCloth)]
     if any(not isinstance(item, ObjectFluid) for item in scene.objects.values()):
-        pipeline.append("xpbd" if scene.settings.solver in {"auto", "xpbd", "smoke", "apic"} else scene.settings.solver)
+        rigid_solver = "vbd" if any(item.self_collision for item in cloth) else "xpbd"
+        pipeline.append(
+            rigid_solver if scene.settings.solver in {"auto", "xpbd", "smoke", "apic"} else scene.settings.solver
+        )
     phases = {item.phase for item in scene.objects.values() if isinstance(item, ObjectFluid)}
     if "smoke" in phases:
         pipeline.append("smoke")
     if "liquid" in phases:
         pipeline.append("apic")
     return pipeline or ["xpbd"]
+
+
+def _validate_selector(selector: VertexSelector, vertex_count: int, path: str, error: Any) -> None:
+    """Validate one cloth selector against its stable row-major vertex map."""
+    if selector.kind == "indices":
+        if not selector.indices or any(index < 0 or index >= vertex_count for index in selector.indices):
+            error(path, "invalid_selector", "Selector contains an invalid particle index.", "Use in-range indices.")
+    elif selector.kind == "edge" and selector.edge is None:
+        error(path, "invalid_selector", "Edge selector requires an edge.", "Set top, bottom, left, or right.")
+    elif selector.kind == "uv-corners" and not selector.corners:
+        error(path, "invalid_selector", "Corner selector cannot be empty.", "Select at least one UV corner.")

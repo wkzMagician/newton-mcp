@@ -5,13 +5,18 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
+from threading import Event
 from typing import Any
+
+import numpy as np
 
 from .compiler import SceneCompilerNewton
 from .model import ObjectFluid, Scene
@@ -127,6 +132,130 @@ class SceneExecutorLocal:
             "status": "completed",
             "output": str(output),
             "render_frames": round(scene.settings.duration * scene.render.fps),
+        }
+
+    def run(
+        self,
+        scene: Scene,
+        *,
+        output_dir: Path,
+        cancel_event: Event | None = None,
+        progress: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Create a durable simulation, render, and reproducibility bundle.
+
+        Simulation data is committed before rendering so an encoder failure can
+        be retried without repeating the simulation. ``cancel_event`` is checked
+        at every cached frame, which provides cooperative cancellation between
+        native solver steps.
+
+        Args:
+            scene: Scene to execute.
+            output_dir: Directory receiving the complete output bundle.
+            cancel_event: Optional cooperative cancellation flag.
+            progress: Optional mutable job progress mapping.
+
+        Returns:
+            Final job result including artifacts and diagnostics.
+        """
+        self.compiler.compile(scene)
+        output_dir = output_dir.resolve()
+        cache_dir = output_dir / "cache"
+        frames_dir = cache_dir / "frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        scene_path = output_dir / "scene.json"
+        program_path = output_dir / "program.py"
+        metrics_path = output_dir / "metrics.json"
+        diagnostics_path = output_dir / "diagnostics.jsonl"
+        contacts_path = cache_dir / "contacts.jsonl"
+        cache_manifest_path = cache_dir / "manifest.json"
+        job_manifest_path = output_dir / "manifest.json"
+        animation_path = output_dir / "animation.mp4"
+        scene_payload = scene.to_dict()
+        scene_bytes = json.dumps(scene_payload, sort_keys=True, separators=(",", ":")).encode()
+        scene_hash = hashlib.sha256(scene_bytes).hexdigest()
+        artifacts = {
+            "animation": str(animation_path),
+            "scene": str(scene_path),
+            "program": str(program_path),
+            "metrics": str(metrics_path),
+            "diagnostics": str(diagnostics_path),
+            "cache": str(cache_dir),
+        }
+
+        def update(stage: str, frame: int = 0, status: str = "running") -> None:
+            values = {
+                "status": status,
+                "stage": stage,
+                "frame": frame,
+                "total_frames": round(scene.settings.duration * scene.settings.fps),
+                "scene": scene.name,
+                "scene_hash": scene_hash,
+                "output_dir": str(output_dir),
+                "artifacts": artifacts,
+            }
+            if progress is not None:
+                progress.update(values)
+            job_manifest_path.write_text(json.dumps(values, indent=2) + "\n", encoding="utf-8")
+
+        update("compile")
+        scene_path.write_text(json.dumps(scene_payload, indent=2) + "\n", encoding="utf-8")
+        self.compiler.export_program(scene, program_path)
+        diagnostics_path.write_text("", encoding="utf-8")
+        contacts_path.write_text("", encoding="utf-8")
+
+        simulation_started = time.perf_counter()
+        simulation = self.simulate(scene)
+        trajectories = simulation.pop("trajectories")
+        frame_count = simulation["frames"]
+        for frame_index in range(frame_count):
+            if cancel_event is not None and cancel_event.is_set():
+                update("simulation", frame_index, "cancelled")
+                return {"status": "cancelled", "scene": scene.name, "artifacts": artifacts}
+            frame_state = {
+                object_id: np.asarray(samples[frame_index], dtype=np.float32)
+                for object_id, samples in trajectories.items()
+            }
+            np.savez_compressed(frames_dir / f"{frame_index:06d}.npz", **frame_state)
+            update("simulation", frame_index + 1)
+        simulation_seconds = time.perf_counter() - simulation_started
+        metrics = {
+            **simulation["metrics"],
+            "scene_hash": scene_hash,
+            "timings": {"simulation_seconds": simulation_seconds},
+        }
+        metrics_path.write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
+        cache_manifest = {
+            "schema_version": 1,
+            "scene_hash": scene_hash,
+            "complete": True,
+            "frames": frame_count,
+            "fps": scene.settings.fps,
+            "frame_pattern": "frames/%06d.npz",
+            "contacts": contacts_path.name,
+            "metrics": "../metrics.json",
+        }
+        cache_manifest_path.write_text(json.dumps(cache_manifest, indent=2) + "\n", encoding="utf-8")
+
+        if cancel_event is not None and cancel_event.is_set():
+            update("render", frame_count, "cancelled")
+            return {"status": "cancelled", "scene": scene.name, "artifacts": artifacts}
+        update("render", frame_count)
+        render_started = time.perf_counter()
+        rendered = self.render(scene, output=animation_path)
+        metrics["timings"]["render_seconds"] = time.perf_counter() - render_started
+        metrics_path.write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
+        status = rendered["status"]
+        update("completed" if status == "completed" else "render_failed", frame_count, status)
+        return {
+            "status": status,
+            "stage": "completed" if status == "completed" else "render_failed",
+            "scene": scene.name,
+            "scene_hash": scene_hash,
+            "frames": frame_count,
+            "artifacts": artifacts,
+            "metrics": metrics,
+            "diagnostics": rendered.get("diagnostics", []),
         }
 
     def export(self, scene: Scene, *, output: Path, format: str) -> dict[str, Any]:
