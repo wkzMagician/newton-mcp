@@ -64,33 +64,6 @@ class SceneTools:
             "outputs": ["mp4", "scene-json", "python", "metrics", "diagnostics"],
         }
 
-    def get_scene_schema(self) -> dict[str, Any]:
-        """Return the discriminated high-level JSON schema contract."""
-        return {
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "title": "Newton Scene IR",
-            "type": "object",
-            "required": ["name", "schema_version", "objects"],
-            "properties": {
-                "schema_version": {"const": 2},
-                "name": {"type": "string"},
-                "objects": {
-                    "type": "object",
-                    "additionalProperties": {
-                        "oneOf": [
-                            {"properties": {"kind": {"const": kind}}, "required": ["id", "kind"]}
-                            for kind in ("rigid", "cloth", "fluid", "container")
-                        ]
-                    },
-                },
-                "constraints": {"type": "object"},
-                "fields": {"type": "object"},
-                "actions": {"type": "object"},
-                "settings": {"type": "object"},
-                "render": {"type": "object"},
-            },
-        }
-
     def add_object(self, scene_name: str, spec: dict[str, Any]) -> dict[str, Any]:
         """Add a rigid, cloth, or fluid object."""
         scene = self.store.load(scene_name)
@@ -144,8 +117,26 @@ class SceneTools:
         self.store.save(candidate)
         return candidate.to_dict()
 
-    def update_item(self, scene_name: str, collection: str, item_id: str, patch: dict[str, Any]) -> dict[str, Any]:
-        """Apply a shallow patch to an existing object, constraint, or field."""
+    def update_object(self, scene_name: str, item_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        """Update a rigid, cloth, fluid, or container object."""
+        return self._update_collection_entry(scene_name, "objects", item_id, patch)
+
+    def update_constraint(self, scene_name: str, item_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        """Update a fixed-point or distance constraint."""
+        return self._update_collection_entry(scene_name, "constraints", item_id, patch)
+
+    def update_field(self, scene_name: str, item_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        """Update a uniform or radial field."""
+        return self._update_collection_entry(scene_name, "fields", item_id, patch)
+
+    def update_action(self, scene_name: str, item_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        """Update a transform, impulse, force, or emission action."""
+        return self._update_collection_entry(scene_name, "actions", item_id, patch)
+
+    def _update_collection_entry(
+        self, scene_name: str, collection: str, item_id: str, patch: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Apply a validated shallow patch to one typed collection."""
         scene = self.store.load(scene_name)
         items = _collection(scene, collection)
         if item_id not in items:

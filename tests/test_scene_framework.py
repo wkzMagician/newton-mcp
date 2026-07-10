@@ -61,15 +61,22 @@ class TestSceneFramework(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "constraint:link"):
             self.tools.remove_item("demo", "objects", "a")
 
-    def test_rejects_kind_change_and_dangling_update(self):
+    def test_typed_updates_reject_kind_change_and_dangling_reference(self):
         self.tools.add_object("demo", {"id": "a", "kind": "rigid"})
         self.tools.add_object("demo", {"id": "b", "kind": "rigid"})
         self.tools.add_constraint("demo", {"id": "link", "kind": "distance", "object_a": "a", "object_b": "b"})
 
         with self.assertRaisesRegex(ValueError, "kinds cannot be changed"):
-            self.tools.update_item("demo", "objects", "a", {"kind": "cloth"})
+            self.tools.update_object("demo", "a", {"kind": "cloth"})
         with self.assertRaisesRegex(ValueError, "Unknown object id: missing"):
-            self.tools.update_item("demo", "constraints", "link", {"object_b": "missing"})
+            self.tools.update_constraint("demo", "link", {"kind": "distance", "object_b": "missing"})
+
+    def test_typed_updates_only_change_explicit_fields(self):
+        self.tools.add_object("demo", {"id": "ball", "kind": "rigid", "shape": "sphere"})
+        updated = self.tools.update_object("demo", "ball", {"kind": "rigid", "linear_velocity": [1.0, 2.0, 3.0]})
+
+        self.assertEqual(updated["linear_velocity"], [1.0, 2.0, 3.0])
+        self.assertEqual(updated["shape"], "sphere")
 
     def test_exports_json(self):
         output = self.root / "exports" / "demo.json"

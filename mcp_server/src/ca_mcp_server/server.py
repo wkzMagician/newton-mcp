@@ -15,6 +15,19 @@ from mcp.server.fastmcp import FastMCP
 from ca_framework.mcp import SceneTools
 from ca_framework.scene import SceneExecutorLocal, SceneStore
 
+from .dto import (
+    ActionPatchDTO,
+    ActionSpecDTO,
+    ConstraintPatchDTO,
+    ConstraintSpecDTO,
+    FieldPatchDTO,
+    FieldSpecDTO,
+    ObjectPatchDTO,
+    ObjectSpecDTO,
+    SceneDTO,
+    ScenePatchDTO,
+)
+
 mcp = FastMCP(
     "Newton Scene Editor",
     instructions="Create and edit backend-neutral animation scenes, then simulate, render, or export them with Newton.",
@@ -37,7 +50,7 @@ def get_capabilities() -> dict[str, Any]:
 @mcp.tool()
 def get_scene_schema() -> dict[str, Any]:
     """Return the discriminated JSON schema for scene IR version 2."""
-    return _tools().get_scene_schema()
+    return SceneDTO.model_json_schema()
 
 
 @mcp.tool()
@@ -59,44 +72,57 @@ def get_scene(name: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def apply_scene_patch(scene_name: str, patch: dict[str, Any]) -> dict[str, Any]:
+def apply_scene_patch(scene_name: str, patch: ScenePatchDTO) -> dict[str, Any]:
     """Transactionally apply a recursive merge patch to a scene."""
-    return _tools().apply_scene_patch(scene_name, patch)
+    return _tools().apply_scene_patch(scene_name, patch.model_dump(exclude_unset=True))
 
 
 @mcp.tool()
-def add_object(scene_name: str, spec: dict[str, Any]) -> dict[str, Any]:
-    """Add an object; spec.kind is rigid, cloth, or fluid."""
-    return _tools().add_object(scene_name, spec)
+def add_object(scene_name: str, spec: ObjectSpecDTO) -> dict[str, Any]:
+    """Add a rigid body, cloth, smoke/liquid fluid, or compound container."""
+    return _tools().add_object(scene_name, spec.model_dump())
 
 
 @mcp.tool()
-def add_constraint(scene_name: str, spec: dict[str, Any]) -> dict[str, Any]:
+def add_constraint(scene_name: str, spec: ConstraintSpecDTO) -> dict[str, Any]:
     """Add a constraint; spec.kind is fixed-point or distance."""
-    return _tools().add_constraint(scene_name, spec)
+    return _tools().add_constraint(scene_name, spec.model_dump())
 
 
 @mcp.tool()
-def add_field(scene_name: str, spec: dict[str, Any]) -> dict[str, Any]:
+def add_field(scene_name: str, spec: FieldSpecDTO) -> dict[str, Any]:
     """Add a force or acceleration field; spec.kind is uniform or radial."""
-    return _tools().add_field(scene_name, spec)
+    return _tools().add_field(scene_name, spec.model_dump())
 
 
 @mcp.tool()
-def add_action(scene_name: str, spec: dict[str, Any]) -> dict[str, Any]:
+def add_action(scene_name: str, spec: ActionSpecDTO) -> dict[str, Any]:
     """Add a transform, impulse, force, or fluid emission action."""
-    return _tools().add_action(scene_name, spec)
+    return _tools().add_action(scene_name, spec.model_dump())
 
 
 @mcp.tool()
-def update_item(
-    scene_name: str,
-    collection: Literal["objects", "constraints", "fields", "actions"],
-    item_id: str,
-    patch: dict[str, Any],
-) -> dict[str, Any]:
-    """Patch one scene item without changing its id or kind."""
-    return _tools().update_item(scene_name, collection, item_id, patch)
+def update_object(scene_name: str, item_id: str, patch: ObjectPatchDTO) -> dict[str, Any]:
+    """Update one object; patch.kind must match its existing object kind."""
+    return _tools().update_object(scene_name, item_id, patch.model_dump(exclude_unset=True))
+
+
+@mcp.tool()
+def update_constraint(scene_name: str, item_id: str, patch: ConstraintPatchDTO) -> dict[str, Any]:
+    """Update one constraint; patch.kind must match its existing constraint kind."""
+    return _tools().update_constraint(scene_name, item_id, patch.model_dump(exclude_unset=True))
+
+
+@mcp.tool()
+def update_field(scene_name: str, item_id: str, patch: FieldPatchDTO) -> dict[str, Any]:
+    """Update one field; patch.kind must match its existing field kind."""
+    return _tools().update_field(scene_name, item_id, patch.model_dump(exclude_unset=True))
+
+
+@mcp.tool()
+def update_action(scene_name: str, item_id: str, patch: ActionPatchDTO) -> dict[str, Any]:
+    """Update one action; patch.kind must match its existing action kind."""
+    return _tools().update_action(scene_name, item_id, patch.model_dump(exclude_unset=True))
 
 
 @mcp.tool()
