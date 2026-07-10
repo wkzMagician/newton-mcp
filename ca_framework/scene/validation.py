@@ -15,6 +15,7 @@ from .model import (
     ActionForce,
     ActionImpulse,
     ActionTransform,
+    ConstraintFixedPoint,
     ObjectCloth,
     ObjectContainer,
     ObjectFluid,
@@ -46,15 +47,35 @@ def estimate_resources(scene: Scene) -> dict[str, int]:
             grid_cells += prod(item.grid_resolution)
             if item.phase == "liquid" and item.particle_spacing > 0.0:
                 particles += prod(max(1, int(size / item.particle_spacing)) for size in item.size)
+                for emitter in item.emitters:
+                    active_substeps = max(
+                        0,
+                        round(
+                            (min(emitter.end_time, scene.settings.duration) - max(0.0, emitter.start_time))
+                            * scene.settings.fps
+                            * scene.settings.substeps
+                        ),
+                    )
+                    particles += active_substeps * prod(
+                        max(1, int(size / item.particle_spacing)) for size in emitter.size
+                    )
     # MAC smoke/APIC grids store several scalar grids plus three face grids.
     # This deliberately overestimates rather than allowing jobs to OOM late.
-    estimated_bytes = particles * 64 + grid_cells * 64
+    has_liquid = any(isinstance(item, ObjectFluid) and item.phase == "liquid" for item in scene.objects.values())
+    particle_capacity = scene.settings.max_particles if has_liquid else particles
+    estimated_bytes = particle_capacity * 64 + grid_cells * 64
     return {
         "particles": particles,
         "grid_cells": grid_cells,
         "simulation_frames": round(scene.settings.duration * scene.settings.fps),
         "render_frames": round(scene.settings.duration * scene.render.fps),
         "estimated_memory_bytes": estimated_bytes,
+        "estimated_contact_pairs": sum(
+            1
+            for index, item_a in enumerate(scene.objects.values())
+            for item_b in list(scene.objects.values())[index + 1 :]
+            if isinstance(item_a, (ObjectRigid, ObjectContainer)) and isinstance(item_b, (ObjectRigid, ObjectContainer))
+        ),
     }
 
 
@@ -177,6 +198,19 @@ def validate_scene(scene: Scene) -> dict[str, Any]:
                         "Emitter dimensions must be positive and density non-negative.",
                         "Use a positive emitter size and non-negative density.",
                     )
+                domain_min = tuple(item.transform.position[axis] - item.size[axis] * 0.5 for axis in range(3))
+                domain_max = tuple(item.transform.position[axis] + item.size[axis] * 0.5 for axis in range(3))
+                emitter_min = tuple(emitter.position[axis] - emitter.size[axis] * 0.5 for axis in range(3))
+                emitter_max = tuple(emitter.position[axis] + emitter.size[axis] * 0.5 for axis in range(3))
+                if item.phase == "smoke" and any(
+                    emitter_min[axis] < domain_min[axis] or emitter_max[axis] > domain_max[axis] for axis in range(3)
+                ):
+                    error(
+                        emitter_path,
+                        "emitter_outside_domain",
+                        "Emitter extends outside the fluid domain.",
+                        "Move or resize the emitter so it fits inside the fluid volume.",
+                    )
 
     for collection_name in ("constraints", "fields", "actions"):
         for key, item in getattr(scene, collection_name).items():
@@ -227,6 +261,24 @@ def validate_scene(scene: Scene) -> dict[str, Any]:
             fluid = scene.objects.get(action.object_id)
             if isinstance(fluid, ObjectFluid) and not 0 <= action.emitter_index < len(fluid.emitters):
                 error(path, "invalid_emitter", "Emitter index is out of range.", "Reference an existing emitter.")
+
+    for key, constraint in scene.constraints.items():
+        if isinstance(constraint, ConstraintFixedPoint) and constraint.selector is not None:
+            target = scene.objects.get(constraint.object_id)
+            if not isinstance(target, ObjectCloth):
+                error(
+                    f"constraints.{key}.selector",
+                    "invalid_selector_target",
+                    "Vertex selectors can only target cloth objects.",
+                    "Remove the selector or reference a cloth object.",
+                )
+            else:
+                _validate_selector(
+                    constraint.selector,
+                    target.resolution[0] * target.resolution[1],
+                    f"constraints.{key}.selector",
+                    error,
+                )
 
     # Fluids entirely larger than an enclosing container cannot be initialized
     # without wall penetration. Containers are open at the top, so only X/Y

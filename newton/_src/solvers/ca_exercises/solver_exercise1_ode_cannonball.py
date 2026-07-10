@@ -10,9 +10,10 @@ but with some additional features. You can utilize the GPU by writing simple
 kernel functions instead explicitly call the cuda or other gpu apis.
 
 In this exercise, Actually there is only 1 body in the scene, but we also
-use kernel functions to manage the states, which helps you get familiar with 
+use kernel functions to manage the states, which helps you get familiar with
 the syntax of warp and how the kernel functions work.
 """
+
 
 @wp.kernel
 def analytic_kernel(
@@ -21,7 +22,7 @@ def analytic_kernel(
     initial_poses: wp.array(dtype=wp.transform),
     initial_velocities: wp.array(dtype=wp.spatial_vector),
     gravity: wp.vec3,
-    time: float
+    time: float,
 ):
     i = wp.tid()
 
@@ -41,6 +42,7 @@ def analytic_kernel(
     body_q_out[i] = wp.transform(p=p, q=x0.q)
     body_qd_out[i] = wp.spatial_vector(v[0], v[1], v[2], v0[3], v0[4], v0[5])
 
+
 @wp.kernel
 def explicit_euler_kernel(
     body_q_in: wp.array(dtype=wp.transform),
@@ -48,7 +50,7 @@ def explicit_euler_kernel(
     body_q_out: wp.array(dtype=wp.transform),
     body_qd_out: wp.array(dtype=wp.spatial_vector),
     gravity: wp.vec3,
-    dt: float
+    dt: float,
 ):
     """
     Explicit Euler method / 显式欧拉法.
@@ -79,7 +81,7 @@ def semi_implicit_euler_kernel(
     body_q_out: wp.array(dtype=wp.transform),
     body_qd_out: wp.array(dtype=wp.spatial_vector),
     gravity: wp.vec3,
-    dt: float
+    dt: float,
 ):
     """
     Semi-Implicit Euler method / 半隐式欧拉法.
@@ -95,7 +97,7 @@ def semi_implicit_euler_kernel(
     lin_v0 = wp.vec3(v0[0], v0[1], v0[2])
 
     # Semi-implicit Euler: update velocity first, then use new velocity for position
-    # 半隐式欧拉：先更新速度，再用新速度更新位置
+    # 半隐式欧拉:先更新速度,再用新速度更新位置
     v_new = lin_v0 + gravity * dt
     p_new = p0 + v_new * dt
 
@@ -111,7 +113,7 @@ def mid_point_kernel(
     body_q_out: wp.array(dtype=wp.transform),
     body_qd_out: wp.array(dtype=wp.spatial_vector),
     gravity: wp.vec3,
-    dt: float
+    dt: float,
 ):
     """
     Mid-point method / 中点法.
@@ -125,11 +127,10 @@ def mid_point_kernel(
     p0 = x0.p
     lin_v0 = wp.vec3(v0[0], v0[1], v0[2])
 
-    # 步骤1：在t时刻评估导数
+    # 步骤1:在t时刻评估导数
     k1_v = gravity
-    k1_p = lin_v0
 
-    # 步骤2：用k1计算中点导数
+    # 步骤2:用k1计算中点导数
     v_mid = lin_v0 + k1_v * dt * 0.5
 
     # 中点导数
@@ -152,7 +153,7 @@ def rk4_kernel(
     body_q_out: wp.array(dtype=wp.transform),
     body_qd_out: wp.array(dtype=wp.spatial_vector),
     gravity: wp.vec3,
-    dt: float
+    dt: float,
 ):
     """
     RK4 (Runge-Kutta 4th order) method / 四阶龙格-库塔法.
@@ -166,8 +167,8 @@ def rk4_kernel(
     p0 = x0.p
     lin_v0 = wp.vec3(v0[0], v0[1], v0[2])
 
-    # 炮弹受恒定重力，加速度为常数
-    
+    # 炮弹受恒定重力,加速度为常数
+
     # k1: derivative at t
     k1_v = gravity
     k1_p = lin_v0
@@ -200,7 +201,7 @@ class SolverExercise1ODECannonBall(SolverBase):
     def __init__(self, model: Model):
         super().__init__(model)
 
-        self.method = 0 # 0: Analytic, 1: Explicit Euler, 2: Semi-Implicit Euler, 3: Mid-Point, 4: RK4
+        self.method = 0  # 0: Analytic, 1: Explicit Euler, 2: Semi-Implicit Euler, 3: Mid-Point, 4: RK4
 
         self.gravity = -9.81
 

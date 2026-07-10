@@ -1,12 +1,11 @@
 # pyright: reportInvalidTypeForm=false
 
+
 import numpy as np
 import warp as wp
-from pathlib import Path
 
 from ...core.types import override
-from ...geometry.broad_phase_common import check_aabb_overlap, is_pair_excluded, test_world_and_group_pair
-from ...geometry.flags import ShapeFlags
+from ...geometry.broad_phase_common import check_aabb_overlap
 from ...geometry.narrow_phase import NarrowPhase
 from ...geometry.types import GeoType
 from ...sim import Contacts, Control, Model, State
@@ -41,7 +40,7 @@ def broadphase_dynamic_aabb_tree_kernel(
 
         lower_j = shape_aabb_lower[j]
         upper_j = shape_aabb_upper[j]
-        
+
         if not check_aabb_overlap(lower_i, upper_i, 0.0, lower_j, upper_j, 0.0):
             continue
 
@@ -105,9 +104,9 @@ def sequential_impulse_contacts_kernel(
     body_inv_inertia: wp.array(dtype=wp.mat33),
     shape_material_mu: wp.array(dtype=float),
     shape_material_restitution: wp.array(dtype=float),
-    body_q: wp.array(dtype=wp.transform),               # Current body transforms
-    body_qd: wp.array(dtype=wp.spatial_vector),         # Current body velocities (linear, angular)
-    body_qd_old: wp.array(dtype=wp.spatial_vector),     # Old body velocities
+    body_q: wp.array(dtype=wp.transform),  # Current body transforms
+    body_qd: wp.array(dtype=wp.spatial_vector),  # Current body velocities (linear, angular)
+    body_qd_old: wp.array(dtype=wp.spatial_vector),  # Old body velocities
     contact_count: wp.array(dtype=wp.int32),
     contact_max: int,
     contact_shape0: wp.array(dtype=wp.int32),
@@ -149,7 +148,7 @@ def sequential_impulse_contacts_kernel(
         p_a = wp.transform_point(xform_a, contact_point0[c] + contact_offset0[c])
         p_b = wp.transform_point(xform_b, contact_point1[c] + contact_offset1[c])
 
-        n = contact_normal[c] # ? 符号
+        n = contact_normal[c]  # ? 符号
 
         com_a = wp.vec3(0.0)
         com_b = wp.vec3(0.0)
@@ -160,7 +159,7 @@ def sequential_impulse_contacts_kernel(
 
         r_a = p_a - com_a
         r_b = p_b - com_b
-        
+
         v_a_old = wp.vec3(0.0)
         w_a_old = wp.vec3(0.0)
         if body_a >= 0:
@@ -168,7 +167,7 @@ def sequential_impulse_contacts_kernel(
             w_a_old = wp.spatial_top(qd_a_old)
             v_a_old = wp.spatial_bottom(qd_a_old)
         v_a_cp_old = v_a_old + wp.cross(w_a_old, r_a)
-        
+
         v_b_old = wp.vec3(0.0)
         w_b_old = wp.vec3(0.0)
         if body_b >= 0:
@@ -183,9 +182,9 @@ def sequential_impulse_contacts_kernel(
         separation = wp.dot(n, p_a - p_b)
         penetration = wp.max(0.0, -separation)
 
-        # 两种材料，取开方
+        # 两种材料,取开方
         restitution = wp.sqrt(shape_material_restitution[shape_a] * shape_material_restitution[shape_b])
-        
+
         target_vn = baumgarte * penetration / dt - restitution * rel_n_old
 
         denom_n = 0.0
@@ -256,11 +255,11 @@ def sequential_impulse_contacts_kernel(
             v_b = wp.spatial_bottom(qd_b) + wp.cross(wp.spatial_top(qd_b), r_b)
 
         rel_v = v_a - v_b
-        vt = rel_v - n * wp.dot(rel_v, n) # 切向相对速度
+        vt = rel_v - n * wp.dot(rel_v, n)  # 切向相对速度
         vt_len = wp.length(vt)
-        t = vt / (vt_len + 1e-6) # 切向向量
+        t = vt / (vt_len + 1e-6)  # 切向向量
         denom_t = 0.0
-        
+
         if body_a >= 0:
             rxt_a = wp.cross(r_a, t)
             denom_t += body_inv_mass[body_a] + wp.dot(t, wp.cross(inv_inertia_a * rxt_a, r_a))
@@ -269,8 +268,8 @@ def sequential_impulse_contacts_kernel(
             rxt_b = wp.cross(r_b, t)
             denom_t += body_inv_mass[body_b] + wp.dot(t, wp.cross(inv_inertia_b * rxt_b, r_b))
 
-        mu = wp.sqrt(shape_material_mu[shape_a] * shape_material_mu[shape_b]) # 取average?
-        # max_friction = mu * lambda_n_new # ? 单次冲量还是总冲量？
+        mu = wp.sqrt(shape_material_mu[shape_a] * shape_material_mu[shape_b])  # 取average?
+        # max_friction = mu * lambda_n_new # ? 单次冲量还是总冲量?
         max_friction = mu * contact_lambda_n[c]
         lambda_t_old = contact_lambda_t[c]
         delta_lambda_t = -vt_len / denom_t
@@ -279,7 +278,7 @@ def sequential_impulse_contacts_kernel(
         contact_lambda_t[c] = lambda_t_new
 
         impulse_t = t * delta_lambda_t
-            
+
         if body_a >= 0:
             qd_a = body_qd[body_a]
             w_a_old_cur = wp.spatial_top(qd_a)
@@ -295,7 +294,6 @@ def sequential_impulse_contacts_kernel(
             v_b_new = v_b_old_cur - impulse_t * body_inv_mass[body_b]
             w_b_new = w_b_old_cur - inv_inertia_b * wp.cross(r_b, impulse_t)
             body_qd[body_b] = wp.spatial_vector(w_b_new, v_b_new)
-
 
 
 class SolverExercise3RigidBody(SolverBase):
@@ -347,7 +345,9 @@ class SolverExercise3RigidBody(SolverBase):
         self.contact_lambda_n = wp.zeros(self.max_candidate_pairs, dtype=float, device=model.device)
         self.contact_lambda_t = wp.zeros(self.max_candidate_pairs, dtype=float, device=model.device)
 
-    def _integrate_bodies(self, model: Model, state_in: State, state_out: State, dt: float, angular_damping: float) -> None:
+    def _integrate_bodies(
+        self, model: Model, state_in: State, state_out: State, dt: float, angular_damping: float
+    ) -> None:
         wp.launch(
             kernel=integrate_bodies_kernel,
             dim=model.body_count,
@@ -355,7 +355,7 @@ class SolverExercise3RigidBody(SolverBase):
                 model.body_count,
                 state_in.body_q,
                 state_in.body_qd,
-                state_out.body_q, 
+                state_out.body_q,
                 state_out.body_qd,
                 model.body_inv_mass,
                 self.gravity,
@@ -386,7 +386,7 @@ class SolverExercise3RigidBody(SolverBase):
             outputs=[self.shape_aabb_lower, self.shape_aabb_upper],
             device=self.device,
         )
-        
+
         if self._bvh is None:
             self._bvh = wp.Bvh(self.shape_aabb_lower, self.shape_aabb_upper, groups=self.model.shape_world)
         else:
@@ -522,7 +522,7 @@ class SolverExercise3RigidBody(SolverBase):
 
         # 3) Sequential impulse iterations on rigid contact constraints.
         self._solve_contacts(state_out, my_contacts, dt)
-        
+
     @override
     def update_contacts(self, contacts: Contacts) -> None:
         # Contacts are written directly in _detect_contacts().

@@ -1,16 +1,12 @@
+import numpy as np
 import warp as wp
 
 import newton
 import newton.examples
-
-from newton._src.solvers.ca_exercises.fluid_viewer import (
-    FluidViewerGL,
-    SmokeVolumeRenderer,
-    init as fluid_init,
-)
+from newton.viewer import RendererSmokeVolume, ViewerFluidGL, init_fluid_viewer
 
 
-class Exercise5Fluid:
+class Example:
     def __init__(self, viewer, args):
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
@@ -31,17 +27,20 @@ class Exercise5Fluid:
         self.res = (48, 48, 72)
         self.domain_size = (1.0, 1.0, 1.5)
 
-        self.solver = newton.solvers.SolverExercise5Fluid(
+        self.solver = newton.solvers.SolverFluidSmoke(
             self.model,
             res=self.res,
             domain_size=self.domain_size,
             pressure_iters=25,
             buoyancy=0.1,
-            wind_on=False,
-            wind_strength=0.05,
-            source_box=((0.35, 0.35, 0.05), (0.65, 0.65, 0.15)),
-            obstacle_box=((0.40, 0.40, 0.60), (0.60, 0.60, 0.70)),
-            obstacle_on=False,
+            emitters=[
+                newton.solvers.SolverFluidSmoke.Emitter(
+                    position=(0.5, 0.5, 0.1),
+                    size=(0.3, 0.3, 0.1),
+                    start_time=0.0,
+                    end_time=1000.0,
+                )
+            ],
         )
 
         self.state_0 = self.model.state()
@@ -51,8 +50,8 @@ class Exercise5Fluid:
 
         # Attach volumetric smoke compositor when we're on FluidViewerGL.
         self.smoke_renderer = None
-        if isinstance(viewer, FluidViewerGL):
-            self.smoke_renderer = SmokeVolumeRenderer(
+        if isinstance(viewer, ViewerFluidGL):
+            self.smoke_renderer = RendererSmokeVolume(
                 viewer,
                 world_min=self.solver.grid_min,
                 world_max=self.solver.grid_max,
@@ -66,10 +65,6 @@ class Exercise5Fluid:
             self.reset()
 
         _changed, self.solver.wind_on = ui.checkbox("Apply Wind", self.solver.wind_on)
-
-        obstacle_changed, new_obstacle_on = ui.checkbox("Obstacle", self.solver.obstacle_on)
-        if obstacle_changed:
-            self.solver.set_obstacle_active(new_obstacle_on)
 
     def reset(self):
         self.sim_time = 0.0
@@ -93,8 +88,6 @@ class Exercise5Fluid:
         self.viewer.end_frame()
 
     def test_final(self):
-        import numpy as np
-
         density = self.solver.density.numpy()
         total = float(np.sum(density))
         assert np.all(np.isfinite(density)), "density field contains NaN or Inf"
@@ -102,6 +95,6 @@ class Exercise5Fluid:
 
 
 if __name__ == "__main__":
-    viewer, args = fluid_init()
-    example = Exercise5Fluid(viewer, args)
+    viewer, args = init_fluid_viewer()
+    example = Example(viewer, args)
     newton.examples.run(example, args)

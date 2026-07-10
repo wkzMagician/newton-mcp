@@ -6,12 +6,12 @@ from ...core.types import override
 from ...sim import Contacts, Control, Model, State
 from ..solver import SolverBase
 
-
 # ---------------------------------------------------------------------------
 # Kernels
 # ---------------------------------------------------------------------------
 
-# 在烟源区域内持续写入密度，用来生成烟雾；如果该网格是固体则不写入。
+# 在烟源区域内持续写入密度,用来生成烟雾;如果该网格是固体则不写入。
+
 
 @wp.kernel
 def apply_density_source_kernel(
@@ -34,6 +34,7 @@ def apply_density_source_kernel(
 
 
 # ----- Sampling helpers (semi-Lagrangian advection) -----
+
 
 @wp.func
 def sample_centered_clamped(
@@ -74,7 +75,9 @@ def sample_centered_clamped(
     c1 = c01 * (1.0 - ty) + c11 * ty
     return c0 * (1.0 - tz) + c1 * tz
 
+
 # 存在 cell 的面上
+
 
 @wp.func
 def velocity_at_cell_center(
@@ -91,7 +94,8 @@ def velocity_at_cell_center(
     return wp.vec3(ux, vy, wz)
 
 
-# 根据障碍物盒子的范围，把对应的中心网格标记为固体单元。
+# 根据障碍物盒子的范围,把对应的中心网格标记为固体单元。
+
 
 @wp.kernel
 def fill_solid_box_kernel(
@@ -101,18 +105,12 @@ def fill_solid_box_kernel(
 ):
     i, j, k = wp.tid()
 
-    if (
-        i >= box_min[0]
-        and i < box_max[0]
-        and j >= box_min[1]
-        and j < box_max[1]
-        and k >= box_min[2]
-        and k < box_max[2]
-    ):
+    if i >= box_min[0] and i < box_max[0] and j >= box_min[1] and j < box_max[1] and k >= box_min[2] and k < box_max[2]:
         solid[i, j, k] = 1
 
 
-# 根据相邻单元的烟雾密度，在 z 方向速度面上加入向上的浮力。
+# 根据相邻单元的烟雾密度,在 z 方向速度面上加入向上的浮力。
+
 
 @wp.kernel
 def add_buoyancy_kernel(
@@ -125,7 +123,6 @@ def add_buoyancy_kernel(
     ny: int,
     nz: int,
 ):
-    
     i, j, k = wp.tid()
 
     # w lives on z-faces, shape (nx, ny, nz+1). w[i, j, k] sits between
@@ -143,7 +140,8 @@ def add_buoyancy_kernel(
     w[i, j, k] = w[i, j, k] + buoyancy_scale * rho * dt
 
 
-# 在 y 方向速度面上加入风力，并跳过边界和固体相邻的速度面。
+# 在 y 方向速度面上加入风力,并跳过边界和固体相邻的速度面。
+
 
 @wp.kernel
 def add_wind_kernel(
@@ -169,7 +167,8 @@ def add_wind_kernel(
     v[i, j, k] = v[i, j, k] + wind_force * dt
 
 
-# 处理 x 方向速度的边界条件：外边界和固体相邻面上的法向速度置零。
+# 处理 x 方向速度的边界条件:外边界和固体相邻面上的法向速度置零。
+
 
 @wp.kernel
 def enforce_solid_velocity_u_kernel(
@@ -189,7 +188,8 @@ def enforce_solid_velocity_u_kernel(
         u[i, j, k] = 0.0
 
 
-# 处理 y 方向速度的边界条件：外边界和固体相邻面上的法向速度置零。
+# 处理 y 方向速度的边界条件:外边界和固体相邻面上的法向速度置零。
+
 
 @wp.kernel
 def enforce_solid_velocity_v_kernel(
@@ -209,7 +209,8 @@ def enforce_solid_velocity_v_kernel(
         v[i, j, k] = 0.0
 
 
-# 处理 z 方向速度的边界条件：外边界和固体相邻面上的法向速度置零。
+# 处理 z 方向速度的边界条件:外边界和固体相邻面上的法向速度置零。
+
 
 @wp.kernel
 def enforce_solid_velocity_w_kernel(
@@ -229,7 +230,8 @@ def enforce_solid_velocity_w_kernel(
         w[i, j, k] = 0.0
 
 
-# 在每个流体单元中心计算 MAC 网格速度场的散度，供压力投影使用。
+# 在每个流体单元中心计算 MAC 网格速度场的散度,供压力投影使用。
+
 
 @wp.kernel
 def compute_divergence_kernel(
@@ -247,13 +249,12 @@ def compute_divergence_kernel(
         return
 
     divergence[i, j, k] = (
-        (u[i + 1, j, k] - u[i, j, k])
-        + (v[i, j + 1, k] - v[i, j, k])
-        + (w[i, j, k + 1] - w[i, j, k])
+        (u[i + 1, j, k] - u[i, j, k]) + (v[i, j + 1, k] - v[i, j, k]) + (w[i, j, k + 1] - w[i, j, k])
     ) * inv_dx
 
 
-# 执行一次红黑 Gauss-Seidel 压力迭代，只更新指定奇偶性的流体单元。
+# 执行一次红黑 Gauss-Seidel 压力迭代,只更新指定奇偶性的流体单元。
+
 
 @wp.kernel
 def gauss_seidel_rb_step_kernel(
@@ -305,7 +306,8 @@ def gauss_seidel_rb_step_kernel(
         pressure[i, j, k] = 0.0
 
 
-# 用相邻单元的压力差修正 x 方向面速度，使速度场趋于无散。
+# 用相邻单元的压力差修正 x 方向面速度,使速度场趋于无散。
+
 
 @wp.kernel
 def project_velocity_u_kernel(
@@ -331,7 +333,8 @@ def project_velocity_u_kernel(
     u[i, j, k] = u[i, j, k] - dt * (pressure[i, j, k] - pressure[i - 1, j, k]) * inv_dx
 
 
-# 用相邻单元的压力差修正 y 方向面速度，使速度场趋于无散。
+# 用相邻单元的压力差修正 y 方向面速度,使速度场趋于无散。
+
 
 @wp.kernel
 def project_velocity_v_kernel(
@@ -357,7 +360,8 @@ def project_velocity_v_kernel(
     v[i, j, k] = v[i, j, k] - dt * (pressure[i, j, k] - pressure[i, j - 1, k]) * inv_dx
 
 
-# 用相邻单元的压力差修正 z 方向面速度，使速度场趋于无散。
+# 用相邻单元的压力差修正 z 方向面速度,使速度场趋于无散。
+
 
 @wp.kernel
 def project_velocity_w_kernel(
@@ -383,7 +387,8 @@ def project_velocity_w_kernel(
     w[i, j, k] = w[i, j, k] - dt * (pressure[i, j, k] - pressure[i, j, k - 1]) * inv_dx
 
 
-# 对中心存储的烟雾密度做半拉格朗日回溯采样，得到下一步密度场。
+# 对中心存储的烟雾密度做半拉格朗日回溯采样,得到下一步密度场。
+
 
 @wp.kernel
 def advect_density_kernel(
@@ -424,7 +429,8 @@ def advect_density_kernel(
     )
 
 
-# 对 x 方向面速度做半拉格朗日自平流，并保持边界和固体面速度为零。
+# 对 x 方向面速度做半拉格朗日自平流,并保持边界和固体面速度为零。
+
 
 @wp.kernel
 def advect_velocity_u_kernel(
@@ -462,7 +468,8 @@ def advect_velocity_u_kernel(
     u_out[i, j, k] = sample_centered_clamped(u_in, bx, by - 0.5, bz - 0.5, nx + 1, ny, nz)
 
 
-# 对 y 方向面速度做半拉格朗日自平流，并保持边界和固体面速度为零。
+# 对 y 方向面速度做半拉格朗日自平流,并保持边界和固体面速度为零。
+
 
 @wp.kernel
 def advect_velocity_v_kernel(
@@ -500,7 +507,8 @@ def advect_velocity_v_kernel(
     v_out[i, j, k] = sample_centered_clamped(v_in, bx - 0.5, by, bz - 0.5, nx, ny + 1, nz)
 
 
-# 对 z 方向面速度做半拉格朗日自平流，并保持边界和固体面速度为零。
+# 对 z 方向面速度做半拉格朗日自平流,并保持边界和固体面速度为零。
+
 
 @wp.kernel
 def advect_velocity_w_kernel(

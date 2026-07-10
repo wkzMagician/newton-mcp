@@ -33,6 +33,10 @@ from .style3d.solver_style3d import SolverStyle3D
 from .vbd import SolverVBD
 from .xpbd import SolverXPBD
 
+# The course-era public name remains a compatibility alias to the formal
+# production smoke solver. The implementation base stays internal.
+SolverExercise5Fluid = SolverFluidSmoke
+
 __all__ = [
     "SolverBase",
     "SolverExercise1ODECannonBall",

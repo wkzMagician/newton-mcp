@@ -529,7 +529,7 @@ com_solvers = {
         True,
     ),
     "featherstone": (
-        lambda model: newton.solvers.SolverFeatherstone(model),
+        newton.solvers.SolverFeatherstone,
         1e-3,
         False,  # Does NOT support torque-CoM tests - uses body origin coordinates internally
     ),

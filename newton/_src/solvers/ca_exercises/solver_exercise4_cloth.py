@@ -36,8 +36,8 @@ def eval_spring_force(
 
     if length > 1.0e-8:
         direction = delta / length
-        force = stiffness * (rest_length - length) * direction # 弹力
-        force += damping * wp.dot(vel_b - vel_a, direction) * direction # 阻尼力
+        force = stiffness * (rest_length - length) * direction  # 弹力
+        force += damping * wp.dot(vel_b - vel_a, direction) * direction  # 阻尼力
 
     return force
 
@@ -300,31 +300,91 @@ def implicit_euler_build_system_kernel(
 
             if i + 1 < grid_n:
                 add_spring_jacobian_to_system(
-                    particle_q, particle_qd, lhs, rhs, idx, (i + 1) * grid_m + j, cell_size, k_struct, damping, dt, system_size
+                    particle_q,
+                    particle_qd,
+                    lhs,
+                    rhs,
+                    idx,
+                    (i + 1) * grid_m + j,
+                    cell_size,
+                    k_struct,
+                    damping,
+                    dt,
+                    system_size,
                 )
             if j + 1 < grid_m:
                 add_spring_jacobian_to_system(
-                    particle_q, particle_qd, lhs, rhs, idx, i * grid_m + j + 1, cell_size, k_struct, damping, dt, system_size
+                    particle_q,
+                    particle_qd,
+                    lhs,
+                    rhs,
+                    idx,
+                    i * grid_m + j + 1,
+                    cell_size,
+                    k_struct,
+                    damping,
+                    dt,
+                    system_size,
                 )
 
             shear_rest = wp.sqrt(2.0) * cell_size
             if i + 1 < grid_n and j + 1 < grid_m:
                 add_spring_jacobian_to_system(
-                    particle_q, particle_qd, lhs, rhs, idx, (i + 1) * grid_m + j + 1, shear_rest, k_shear, damping, dt, system_size
+                    particle_q,
+                    particle_qd,
+                    lhs,
+                    rhs,
+                    idx,
+                    (i + 1) * grid_m + j + 1,
+                    shear_rest,
+                    k_shear,
+                    damping,
+                    dt,
+                    system_size,
                 )
             if i + 1 < grid_n and j > 0:
                 add_spring_jacobian_to_system(
-                    particle_q, particle_qd, lhs, rhs, idx, (i + 1) * grid_m + j - 1, shear_rest, k_shear, damping, dt, system_size
+                    particle_q,
+                    particle_qd,
+                    lhs,
+                    rhs,
+                    idx,
+                    (i + 1) * grid_m + j - 1,
+                    shear_rest,
+                    k_shear,
+                    damping,
+                    dt,
+                    system_size,
                 )
 
             bend_rest = 2.0 * cell_size
             if i + 2 < grid_n:
                 add_spring_jacobian_to_system(
-                    particle_q, particle_qd, lhs, rhs, idx, (i + 2) * grid_m + j, bend_rest, k_bend, damping, dt, system_size
+                    particle_q,
+                    particle_qd,
+                    lhs,
+                    rhs,
+                    idx,
+                    (i + 2) * grid_m + j,
+                    bend_rest,
+                    k_bend,
+                    damping,
+                    dt,
+                    system_size,
                 )
             if j + 2 < grid_m:
                 add_spring_jacobian_to_system(
-                    particle_q, particle_qd, lhs, rhs, idx, i * grid_m + j + 2, bend_rest, k_bend, damping, dt, system_size
+                    particle_q,
+                    particle_qd,
+                    lhs,
+                    rhs,
+                    idx,
+                    i * grid_m + j + 2,
+                    bend_rest,
+                    k_bend,
+                    damping,
+                    dt,
+                    system_size,
                 )
 
     for fixed_particle in range(2):

@@ -27,6 +27,7 @@ SSFR_BASE_ALPHA = 0.035
 SSFR_ALPHA_SCALE = 0.9
 SSFR_EDGE_ALPHA = 0.18
 
+
 @wp.kernel
 def pack_particle_centers_and_radius(
     points: wp.array(dtype=wp.vec3),
@@ -767,7 +768,6 @@ class ScreenSpaceFluidRenderer:
         gl.glBindVertexArray(self.viewer.renderer._frame_vao)
         gl.glDrawElements(gl.GL_TRIANGLES, len(self.viewer.renderer._frame_indices), gl.GL_UNSIGNED_INT, None)
         gl.glBindVertexArray(0)
-
 
 
 class FluidViewerGL(ViewerGL):

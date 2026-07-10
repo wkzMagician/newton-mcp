@@ -1,8 +1,9 @@
+import time
+
 import warp as wp
 
 import newton
 import newton.examples
-import time
 
 
 class Exercise4Cloth:
@@ -50,8 +51,8 @@ class Exercise4Cloth:
                 "k_struct": self.k_struct,
                 "k_bend": self.k_bend,
                 "k_shear": self.k_shear,
-                "damping": self.damping
-            }
+                "damping": self.damping,
+            },
         )
 
         self.state_0 = self.model.state()

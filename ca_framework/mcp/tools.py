@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from concurrent.futures import Future, ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import asdict
@@ -38,6 +39,8 @@ class SceneExecutor(Protocol):
         progress: dict[str, Any] | None = None,
     ) -> dict[str, Any]: ...
 
+    def resume_render(self, scene: Scene, *, output_dir: Path) -> dict[str, Any]: ...
+
 
 class SceneTools:
     """Safe scene editing operations shared by MCP and local callers."""
@@ -48,6 +51,9 @@ class SceneTools:
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ca-scene")
         self._jobs: dict[str, tuple[Future[dict[str, Any]], str, Event, dict[str, Any]]] = {}
         self._jobs_lock = Lock()
+        self._jobs_dir = self.store.root / ".jobs"
+        self._jobs_dir.mkdir(exist_ok=True)
+        self._restore_jobs()
 
     def create_scene(self, name: str, overwrite: bool = False) -> dict[str, Any]:
         """Create an empty scene."""
@@ -212,25 +218,35 @@ class SceneTools:
         )
         with self._jobs_lock:
             self._jobs[job_id] = (future, scene_name, cancel_event, progress)
-        return {"job_id": job_id, **progress, "output_dir": str(Path(output_dir).resolve())}
+        result = {"job_id": job_id, **progress, "output_dir": str(Path(output_dir).resolve())}
+        self._write_job_record(job_id, result)
+        return result
 
     def get_job(self, job_id: str) -> dict[str, Any]:
         """Return asynchronous job state or result."""
         with self._jobs_lock:
             future, scene_name, _cancel_event, progress = self._jobs[job_id]
         if future.cancelled():
-            return {"job_id": job_id, "status": "cancelled", "scene": scene_name}
+            result = {"job_id": job_id, "status": "cancelled", "scene": scene_name}
+            self._write_job_record(job_id, result)
+            return result
         if not future.done():
-            return {"job_id": job_id, **progress, "scene": scene_name}
+            result = {"job_id": job_id, **progress, "scene": scene_name}
+            self._write_job_record(job_id, result)
+            return result
         try:
-            return {"job_id": job_id, **future.result()}
+            result = {"job_id": job_id, **future.result()}
+            self._write_job_record(job_id, result)
+            return result
         except Exception as error:
-            return {
+            result = {
                 "job_id": job_id,
                 "status": "failed",
                 "scene": scene_name,
                 "diagnostics": [{"code": "job_failed", "message": str(error)}],
             }
+            self._write_job_record(job_id, result)
+            return result
 
     def cancel_job(self, job_id: str) -> dict[str, Any]:
         """Cancel a queued job; running native work completes safely."""
@@ -239,12 +255,52 @@ class SceneTools:
         cancel_event.set()
         cancelled = future.cancel()
         progress["status"] = "cancelled" if cancelled else "cancelling"
-        return {
+        result = {
             "job_id": job_id,
             "scene": scene_name,
             "status": progress["status"],
             "cancelled": True,
         }
+        self._write_job_record(job_id, result)
+        return result
+
+    def _write_job_record(self, job_id: str, record: dict[str, Any]) -> None:
+        path = self._jobs_dir / f"{job_id}.json"
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(path)
+
+    def _restore_jobs(self) -> None:
+        """Restore durable job state and resume render-only work when safe."""
+        for path in self._jobs_dir.glob("*.json"):
+            record = json.loads(path.read_text(encoding="utf-8"))
+            job_id = record["job_id"]
+            scene_name = record["scene"]
+            status = record.get("status", "interrupted")
+            output_dir = Path(record.get("output_dir", ""))
+            cache_manifest = output_dir / "cache" / "manifest.json"
+            cancel_event = Event()
+            progress = dict(record)
+            if status in {"queued", "running", "cancelling"} and cache_manifest.is_file() and self.executor:
+                try:
+                    complete = json.loads(cache_manifest.read_text(encoding="utf-8")).get("complete", False)
+                except (OSError, json.JSONDecodeError):
+                    complete = False
+                if complete:
+                    progress.update(status="running", stage="render")
+                    future = self._pool.submit(
+                        self.executor.resume_render,
+                        self.store.load(scene_name),
+                        output_dir=output_dir,
+                    )
+                    self._jobs[job_id] = (future, scene_name, cancel_event, progress)
+                    continue
+            if status in {"queued", "running", "cancelling"}:
+                progress.update(status="interrupted", stage="interrupted")
+                self._write_job_record(job_id, progress)
+            future = Future()
+            future.set_result(progress)
+            self._jobs[job_id] = (future, scene_name, cancel_event, progress)
 
     def export_program(self, scene_name: str, program_output: str, scene_output: str) -> dict[str, Any]:
         """Export a reproducible Python program and its scene JSON."""

@@ -1,16 +1,17 @@
 ---
 name: design-fluid-scenes
-description: Design particle-fluid animation scenes for Newton or MPM backends, including source volumes, particle spacing, containers, gravity, and force fields. Use when a prompt involves liquids, granular media, splashes, pouring, or volume-filling particle simulations.
+description: Design Newton smoke and APIC/FLIP liquid scenes, including domains, emitters, particle spacing, containers, gravity, and force fields. Use when a prompt involves smoke, liquids, splashes, pouring, buoyancy, or volume-filling simulations.
 ---
 
 # Design fluid scenes
 
-1. Represent the initial occupied volume as a `fluid` object and set `particle_spacing` in meters.
-2. Use static rigid bodies for floors, walls, obstacles, and containers.
-3. Leave clearance of at least one particle spacing between fluid particles and container boundaries.
-4. Select `mpm` when the material or Newton implementation requires it; otherwise keep the backend choice explicit in scene metadata.
-5. Use uniform or radial fields for wind, attraction, repulsion, and other bulk effects.
-6. Estimate particle count from volume divided by particle spacing cubed before increasing resolution.
-7. Prefer a short low-resolution validation run before a final render.
+1. Choose `phase: smoke` for a MAC-grid gas or `phase: liquid` for APIC/FLIP particles.
+2. Represent liquid initial volume with `size` and `particle_spacing` [m]; describe smoke sources with timed `emitters`.
+3. Use `motion: static` rigid bodies or `container` objects for floors, walls, and obstacles.
+4. Leave clearance of at least one particle spacing between fluid particles and container boundaries.
+5. Use `solver: auto`; smoke routes to `smoke` and liquid routes to `apic`.
+6. Use uniform or radial fields for wind, attraction, repulsion, and other bulk effects.
+7. Estimate particle count from volume divided by particle spacing cubed before increasing resolution.
+8. Prefer a short low-resolution validation run before a final render.
 
-State the intended material behavior in metadata until viscosity and constitutive parameters are part of the scene schema.
+Specify liquid density, viscosity, surface tension, and `flip_ratio`, or smoke buoyancy and dissipation, directly in the scene IR.

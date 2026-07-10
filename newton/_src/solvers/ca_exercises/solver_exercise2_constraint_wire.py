@@ -4,6 +4,7 @@ from ...core.types import override
 from ...sim import Contacts, Control, Model, State
 from ..solver import SolverBase
 
+
 @wp.kernel
 def bead_on_wire_kernel(
     body_q_in: wp.array(dtype=wp.transform),
@@ -13,7 +14,7 @@ def bead_on_wire_kernel(
     origin: wp.vec3,
     radius: float,
     gravity: wp.vec3,
-    dt: float
+    dt: float,
 ):
     i = wp.tid()
 
@@ -26,10 +27,10 @@ def bead_on_wire_kernel(
     radial = p - origin
     lagrange = -(wp.dot(gravity, radial) + wp.dot(lin_v, lin_v)) / wp.dot(radial, radial)
     accel = gravity + lagrange * radial
-    
+
     lin_v_new = lin_v + accel * dt
     p_new = p + lin_v_new * dt
-    
+
     # position-based fix
     radial_new = p_new - origin
     radial_len = wp.length(radial_new)
@@ -39,12 +40,13 @@ def bead_on_wire_kernel(
         n = radial_new / radial_len
         p_new = origin + n * radius
 
-        # 再把速度投影到切向方向：去掉径向分量
+        # 再把速度投影到切向方向:去掉径向分量
         lin_v_new = lin_v_new - wp.dot(lin_v_new, n) * n
 
     # Update the output state
     body_q_out[i] = wp.transform(p=p_new, q=x.q)
     body_qd_out[i] = wp.spatial_vector(lin_v_new, wp.vec3(v[3], v[4], v[5]))
+
 
 class SolverExercise2ConstraintWire(SolverBase):
     def __init__(self, model: Model):
@@ -64,8 +66,8 @@ class SolverExercise2ConstraintWire(SolverBase):
         self, state_in: State, state_out: State, control: Control | None, contacts: Contacts | None, dt: float
     ) -> State | None:
         wp.launch(
-            bead_on_wire_kernel, 
-            dim=state_in.body_q.shape[0], 
+            bead_on_wire_kernel,
+            dim=state_in.body_q.shape[0],
             inputs=[
                 state_in.body_q,
                 state_in.body_qd,

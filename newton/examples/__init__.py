@@ -178,7 +178,7 @@ def test_particle_state(
 
 def run(example, args):
     if hasattr(example, "gui") and hasattr(example.viewer, "register_ui_callback"):
-        example.viewer.register_ui_callback(lambda ui: example.gui(ui), position="side")
+        example.viewer.register_ui_callback(example.gui, position="side")
 
     perform_test = args is not None and args.test
     test_post_step = perform_test and hasattr(example, "test_post_step")

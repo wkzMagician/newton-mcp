@@ -14,10 +14,23 @@
 # limitations under the License.
 
 # Import all viewer classes (they handle missing dependencies at instantiation time)
-from ._src.solvers.ca_exercises.fluid_viewer import FluidViewerGL as ViewerFluidGL
+from ._src.solvers.ca_exercises.fluid_viewer import (
+    FluidViewerGL as ViewerFluidGL,
+)
+from ._src.solvers.ca_exercises.fluid_viewer import (
+    ScreenSpaceFluidRenderer as RendererFluidScreenSpace,
+)
+from ._src.solvers.ca_exercises.fluid_viewer import (
+    SmokeVolumeRenderer as RendererSmokeVolume,
+)
+from ._src.solvers.ca_exercises.fluid_viewer import (
+    init as init_fluid_viewer,
+)
 from ._src.viewer import ViewerFile, ViewerGL, ViewerNull, ViewerRerun, ViewerUSD, ViewerViser
 
 __all__ = [
+    "RendererFluidScreenSpace",
+    "RendererSmokeVolume",
     "ViewerFile",
     "ViewerFluidGL",
     "ViewerGL",
@@ -25,4 +38,5 @@ __all__ = [
     "ViewerRerun",
     "ViewerUSD",
     "ViewerViser",
+    "init_fluid_viewer",
 ]

@@ -9,6 +9,8 @@ newton.viewer
    :toctree: _generated
    :nosignatures:
 
+   RendererFluidScreenSpace
+   RendererSmokeVolume
    ViewerFile
    ViewerFluidGL
    ViewerGL
@@ -16,3 +18,11 @@ newton.viewer
    ViewerRerun
    ViewerUSD
    ViewerViser
+
+.. rubric:: Functions
+
+.. autosummary::
+   :toctree: _generated
+   :signatures: long
+
+   init_fluid_viewer

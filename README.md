@@ -6,7 +6,7 @@ This repository contains the code for the computer animation exercise. The code 
 
 ## Agent scene framework
 
-The repository also contains an initial framework for generating animations from language prompts:
+The repository also contains a prompt-driven framework for generating animations:
 
 - `ca_framework.scene` defines a backend-neutral, JSON-serializable scene model for rigid bodies, cloth, fluids, constraints, and external fields.
 - `ca_framework.mcp` provides protocol-independent scene editing tools.
@@ -19,7 +19,7 @@ Start the stdio MCP server from the repository root:
 uv run --project mcp_server ca-scene-mcp
 ```
 
-Scene files are stored in `.ca-scenes` by default. Set `CA_SCENE_WORKSPACE` to use another directory. The editing and JSON export paths are functional; Newton scene compilation, simulation, and viewer rendering are explicit extension points in `SceneExecutorLocal`.
+Scene files are stored in `.ca-scenes` by default. Set `CA_SCENE_WORKSPACE` to use another directory. `SceneExecutorLocal` compiles rigid bodies and cloth to Newton XPBD/VBD, advances smoke and APIC/FLIP fluid routes, caches every simulated frame, and renders an output bundle. Final jobs use `run_scene(scene_name, output_dir)` and write `animation.mp4`, `scene.json`, `program.py`, `metrics.json`, `diagnostics.jsonl`, and `cache/`.
 
 ## Installation
 

@@ -13,14 +13,18 @@ from ..solver import SolverBase
 #   M26 = mat26(m00, m01, m02, m03, m04, m05, m10, m11, m12, m13, m14, m15)
 #   M66 = mat66(m00, m01, m02, m03, m04, m05, ..., m50, m51, m52, m53, m54, m55)
 
+
 class vec6(wp.types.vector(length=6, dtype=float)):
     """6D vector with float (single-precision) components."""
+
 
 class mat26(wp.types.matrix(shape=(2, 6), dtype=float)):
     """2x6 matrix with float (single-precision) components."""
 
+
 class mat66(wp.types.matrix(shape=(6, 6), dtype=float)):
     """6x6 matrix with float (single-precision) components."""
+
 
 @wp.func
 def ldlt(A: wp.mat22, b: wp.vec2) -> wp.vec2:
@@ -97,16 +101,36 @@ def pendulum_kernel(
     f = vec6(gravity[0], gravity[1], gravity[2], gravity[0], gravity[1], gravity[2])
 
     J = mat26(
-        r1[0],  r1[1],  r1[2],  0.0,    0.0,    0.0,
-        r12[0], r12[1], r12[2], -r12[0], -r12[1], -r12[2],
+        r1[0],
+        r1[1],
+        r1[2],
+        0.0,
+        0.0,
+        0.0,
+        r12[0],
+        r12[1],
+        r12[2],
+        -r12[0],
+        -r12[1],
+        -r12[2],
     )
     Jdot = mat26(
-        v1[0],  v1[1],  v1[2],  0.0,    0.0,    0.0,
-        v12[0], v12[1], v12[2], -v12[0], -v12[1], -v12[2],
+        v1[0],
+        v1[1],
+        v1[2],
+        0.0,
+        0.0,
+        0.0,
+        v12[0],
+        v12[1],
+        v12[2],
+        -v12[0],
+        -v12[1],
+        -v12[2],
     )
 
     A = J @ wp.transpose(J)
-    rhs = -(Jdot @ qd + J @ f) - (kd * Cdot + ks * C) # feedback
+    rhs = -(Jdot @ qd + J @ f) - (kd * Cdot + ks * C)  # feedback
     lagrange = ldlt(A, rhs)
 
     f_tilde = wp.transpose(J) @ lagrange
@@ -146,8 +170,8 @@ class SolverExercise2ConstraintPendulum(SolverBase):
         self, state_in: State, state_out: State, control: Control | None, contacts: Contacts | None, dt: float
     ) -> State | None:
         wp.launch(
-            pendulum_kernel, 
-            dim=state_in.body_q.shape[0], 
+            pendulum_kernel,
+            dim=state_in.body_q.shape[0],
             inputs=[
                 state_in.body_q,
                 state_in.body_qd,

@@ -227,8 +227,9 @@ class Example:
                 self.model,
                 self.state_0,
                 f"cube from world {i} is within bounds and above ground",
-                lambda q, _qd, lower=cube_lower, upper=cube_upper: newton.math.vec_inside_limits(q.p, lower, upper)
-                and q.p[2] > 0.0,
+                lambda q, _qd, lower=cube_lower, upper=cube_upper: (
+                    newton.math.vec_inside_limits(q.p, lower, upper) and q.p[2] > 0.0
+                ),
                 indices=np.array([cube_body_idx], dtype=np.int32),
             )
 
