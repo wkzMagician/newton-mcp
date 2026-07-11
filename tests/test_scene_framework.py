@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import ctypes
 import json
 import math
 import runpy
@@ -16,7 +17,7 @@ import numpy as np
 
 from ca_framework.mcp import SceneTools
 from ca_framework.scene import Scene, SceneExecutorLocal, SceneStore, validate_scene
-from ca_framework.scene.executor import _physics_validation
+from ca_framework.scene.executor import _decode_gl_string, _physics_validation
 from newton.solvers import SolverBase, SolverExercise5Fluid, SolverFluidAPIC, SolverFluidSmoke, SolverSemiImplicit
 from newton.viewer import ViewerFluidGL
 
@@ -30,6 +31,15 @@ class TestSceneFramework(unittest.TestCase):
 
     def tearDown(self):
         self.temporary_directory.cleanup()
+
+    def test_decode_gl_string_from_ctypes_pointer(self):
+        value = ctypes.cast(ctypes.create_string_buffer(b"NVIDIA Corporation"), ctypes.POINTER(ctypes.c_ubyte))
+
+        self.assertEqual(_decode_gl_string(value), "NVIDIA Corporation")
+
+    def test_decode_gl_string_from_bytes_or_null(self):
+        self.assertEqual(_decode_gl_string(b"OpenGL 4.6"), "OpenGL 4.6")
+        self.assertEqual(_decode_gl_string(None), "unknown")
 
     def test_create_edit_and_round_trip_scene(self):
         self.tools.add_object(

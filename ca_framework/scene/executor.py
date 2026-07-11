@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import math
@@ -52,6 +53,17 @@ _PHYSICS_FAILURE_CODES = frozenset(
         "contact_capacity_overflow",
     }
 )
+
+
+def _decode_gl_string(value: Any) -> str:
+    """Decode a string returned by an OpenGL implementation."""
+    if not value:
+        return "unknown"
+    if isinstance(value, bytes):
+        raw = value
+    else:
+        raw = ctypes.string_at(value)
+    return raw.decode("utf-8", errors="replace")
 
 
 def _physics_validation(diagnostics: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1019,8 +1031,7 @@ class SceneExecutorLocal:
             from pyglet import gl
 
             def gl_string(name) -> str:
-                value = gl.glGetString(name)
-                return value.decode("utf-8", errors="replace") if value else "unknown"
+                return _decode_gl_string(gl.glGetString(name))
 
             gl_vendor = gl_string(gl.GL_VENDOR)
             gl_renderer = gl_string(gl.GL_RENDERER)
