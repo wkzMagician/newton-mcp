@@ -211,13 +211,13 @@ class SceneCompilerNewton:
                     cell_y=item.size[1] * scale_y / (height - 1),
                     mass=particle_mass,
                     tri_ke=item.stretch_stiffness,
-                    tri_kd=item.damping,
+                    tri_ka=item.area_stiffness or item.stretch_stiffness,
+                    tri_kd=item.stretch_damping if item.stretch_damping is not None else item.damping,
                     tri_drag=item.air_drag,
                     edge_ke=item.bend_stiffness,
-                    add_springs=True,
-                    spring_ke=item.stretch_stiffness,
-                    spring_kd=item.damping,
-                    particle_radius=item.thickness,
+                    edge_kd=item.bend_damping if item.bend_damping is not None else item.damping,
+                    add_springs=False,
+                    particle_radius=item.collision_radius or item.thickness,
                 )
                 for particle_index in pinned[item.id]:
                     builder.particle_mass[particle_index] = 0.0
@@ -237,6 +237,9 @@ class SceneCompilerNewton:
                 max_distance=constraint.distance,
                 collision_filter_parent=False,
             )
+        pipeline = select_pipeline(scene)
+        if pipeline[0] == "vbd":
+            builder.color(include_bending=True)
         model = builder.finalize()
         initial_shape_scales = model.shape_scale.numpy().copy()
         model.set_gravity(scene.settings.gravity)
@@ -244,10 +247,12 @@ class SceneCompilerNewton:
         state_1 = model.state()
         control = model.control()
         contacts = model.contacts()
-        if any(item.self_collision for item in scene.objects.values() if isinstance(item, ObjectCloth)):
-            solver = newton.solvers.SolverVBD(model, iterations=scene.settings.substeps)
+        if pipeline[0] == "vbd":
+            solver = newton.solvers.SolverVBD(model, iterations=scene.settings.solver_iterations)
         else:
-            solver = newton.solvers.SolverXPBD(model, iterations=10, enable_restitution=True)
+            solver = newton.solvers.SolverXPBD(
+                model, iterations=scene.settings.solver_iterations, enable_restitution=True
+            )
         fluid_solvers = {}
         for item in scene.objects.values():
             if not isinstance(item, ObjectFluid):

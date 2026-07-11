@@ -119,7 +119,9 @@ def canonical_scenes() -> dict[str, Scene]:
                     "resolution": [13, 13],
                     "surface_density": 5.0,
                     "thickness": 0.025,
-                    "stretch_stiffness": 200.0,
+                    "stretch_stiffness": 60000.0,
+                    "area_stiffness": 60000.0,
+                    "bend_stiffness": 20.0,
                     "damping": 2.0,
                     "transform": {"position": [-1.0, -1.0, 1.2]},
                     "pinned": [
@@ -131,10 +133,11 @@ def canonical_scenes() -> dict[str, Scene]:
                     "kind": "rigid",
                     "shape": "sphere",
                     "size": [0.5, 0.5, 0.5],
+                    "physical_material": {"density": 10.0},
                     "transform": {"position": [0.0, 0.0, 2.2]},
                 },
             },
-            "settings": {"duration": 5.0, "fps": 30, "substeps": 12},
+            "settings": {"duration": 5.0, "fps": 30, "substeps": 12, "solver": "vbd"},
             "render": {"camera": {"position": [2.5, -3.5, 2.5], "target": [0.0, 0.0, 1.0]}},
         },
         "05_hanging_cloth": {
@@ -146,8 +149,9 @@ def canonical_scenes() -> dict[str, Scene]:
                     "resolution": [11, 15],
                     "surface_density": 5.0,
                     "thickness": 0.02,
-                    "stretch_stiffness": 100.0,
-                    "bend_stiffness": 5.0,
+                    "stretch_stiffness": 3000.0,
+                    "area_stiffness": 3000.0,
+                    "bend_stiffness": 10.0,
                     "damping": 2.0,
                     "transform": {"position": [-0.75, 0.0, 0.5], "rotation": _quat_x(math.pi * 0.5)},
                     "pinned": [{"kind": "edge", "edge": "top"}],
@@ -163,7 +167,7 @@ def canonical_scenes() -> dict[str, Scene]:
                     "end_time": 0.15,
                 }
             },
-            "settings": {"duration": 5.0, "fps": 30, "substeps": 8},
+            "settings": {"duration": 5.0, "fps": 30, "substeps": 8, "solver": "vbd"},
             "render": {
                 "ground": False,
                 "camera": {
@@ -183,6 +187,10 @@ def canonical_scenes() -> dict[str, Scene]:
                     "resolution": [15, 11],
                     "surface_density": 5.0,
                     "thickness": 0.025,
+                    "stretch_stiffness": 50000.0,
+                    "area_stiffness": 50000.0,
+                    "bend_stiffness": 20.0,
+                    "damping": 2.0,
                     "transform": {"position": [-1.2, -0.8, 1.8]},
                 },
                 "left": {
@@ -202,7 +210,13 @@ def canonical_scenes() -> dict[str, Scene]:
                     "transform": {"position": [0.55, 0.0, 0.55]},
                 },
             },
-            "settings": {"duration": 5.0, "fps": 30, "substeps": 5},
+            "settings": {
+                "duration": 5.0,
+                "fps": 30,
+                "substeps": 12,
+                "solver": "vbd",
+                "solver_iterations": 20,
+            },
             "render": {"camera": {"position": [2.8, -4.0, 2.5], "target": [0.0, 0.0, 0.8]}},
         },
         "07_smoke_partitions": {

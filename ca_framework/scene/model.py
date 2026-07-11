@@ -114,9 +114,13 @@ class ObjectCloth(ObjectBase):
     thickness: float = 0.01
     surface_density: float = 0.2
     stretch_stiffness: float = 1000.0
+    area_stiffness: float | None = None
     bend_stiffness: float = 1.0
     damping: float = 0.01
+    stretch_damping: float | None = None
+    bend_damping: float | None = None
     air_drag: float = 0.0
+    collision_radius: float | None = None
     self_collision: bool = False
     pinned: list[VertexSelector] = field(default_factory=list)
 
@@ -328,6 +332,7 @@ class SimulationSettings:
     duration: float = 5.0
     gravity: Vec3 = (0.0, 0.0, -9.81)
     solver: Literal["auto", "xpbd", "vbd", "smoke", "apic"] = "auto"
+    solver_iterations: int = 10
     max_particles: int = 250_000
 
 

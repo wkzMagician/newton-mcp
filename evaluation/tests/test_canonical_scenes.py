@@ -52,11 +52,15 @@ class TestCanonicalScenes(unittest.TestCase):
         self.assertLess(abs(velocities[-1]), 0.05)
 
     def test_04_cloth_corners_hold_and_center_sags(self):
+        scene = canonical_scenes()["04_cloth_ball"]
         result = _result("04_cloth_ball")
         cloth = result["state_frames"][-1]["cloth_q"]
-        corners = cloth[[0, 12, 156, 168], 2]
+        width, height = scene.objects["cloth"].resolution
+        corner_indices = [0, width - 1, (height - 1) * width, height * width - 1]
+        center_index = (height // 2) * width + width // 2
+        corners = cloth[corner_indices, 2]
         self.assertTrue(np.allclose(corners, 1.2, atol=1.0e-5))
-        center_minimum = min(frame["cloth_q"][84, 2] for frame in result["state_frames"])
+        center_minimum = min(frame["cloth_q"][center_index, 2] for frame in result["state_frames"])
         self.assertLess(center_minimum, corners.mean() - 0.15)
         self.assertGreater(result["metrics"]["soft_contacts"], 0)
         self.assertIn(["ball", "cloth"], result["metrics"]["soft_contact_pairs"])

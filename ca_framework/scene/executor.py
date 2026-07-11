@@ -51,6 +51,7 @@ _PHYSICS_FAILURE_CODES = frozenset(
         "pressure_nonconvergence",
         "particle_capacity_overflow",
         "contact_capacity_overflow",
+        "cloth_deformation_failure",
     }
 )
 
@@ -217,6 +218,16 @@ class SceneExecutorLocal:
                     compiled.contacts,
                     substep_dt,
                 )
+                triangle_contacts = self._project_cloth_triangle_contacts(
+                    scene, compiled, state_in, state_out, substep_dt
+                )
+                soft_contact_count += triangle_contacts
+                contact_count += triangle_contacts
+                if triangle_contacts:
+                    for cloth_id in compiled.cloth_particle_indices:
+                        for shape_id, shape_item in scene.objects.items():
+                            if isinstance(shape_item, ObjectRigid):
+                                soft_contact_pairs.add(tuple(sorted((cloth_id, shape_id))))
                 for fluid_solver in compiled.fluid_solvers.values():
                     fluid_solver.step(state_in, state_out, compiled.control, compiled.contacts, substep_dt)
                 state_in, state_out = state_out, state_in
@@ -369,13 +380,28 @@ class SceneExecutorLocal:
             initial = initial_particle_q[selected]
             final = final_particle_q[selected]
             velocities = final_particle_qd[selected]
+            quality = self._cloth_quality(scene.objects[object_id], initial, final)
             cloth_stats[object_id] = {
                 "finite": bool(np.isfinite(final).all() and np.isfinite(velocities).all()),
                 "max_displacement": float(np.linalg.norm(final - initial, axis=1).max(initial=0.0)),
                 "max_speed": float(np.linalg.norm(velocities, axis=1).max(initial=0.0)),
+                "final_residual_speed": float(np.linalg.norm(velocities, axis=1).mean()),
                 "bounds_min": final.min(axis=0).tolist(),
                 "bounds_max": final.max(axis=0).tolist(),
+                **quality,
             }
+            if (
+                quality["max_edge_length_ratio"] > 2.0
+                or quality["min_triangle_area_ratio"] < 0.05
+                or quality["max_triangle_area_ratio"] > 4.0
+            ):
+                diagnostics.append(
+                    {
+                        "code": "cloth_deformation_failure",
+                        "object_id": object_id,
+                        "message": "Cloth strain exceeded the physical validity bounds.",
+                    }
+                )
         physics = _physics_validation(diagnostics)
         return {
             "status": "completed" if physics["valid"] else "physics_failed",
@@ -414,6 +440,53 @@ class SceneExecutorLocal:
             "trajectories": trajectories,
             "diagnostics": diagnostics,
             **({"state_frames": state_frames, "contact_records": contact_records} if capture_cache else {}),
+        }
+
+    @staticmethod
+    def _cloth_quality(item: ObjectCloth, initial: np.ndarray, final: np.ndarray) -> dict[str, Any]:
+        """Measure cloth edge strain, triangle area change, and orientation flips."""
+        width, height = item.resolution
+        triangles = []
+        edges = set()
+        for y in range(height - 1):
+            for x in range(width - 1):
+                lower = y * width + x
+                triangles.extend(((lower, lower + 1, lower + width + 1), (lower, lower + width + 1, lower + width)))
+                edges.update(
+                    {
+                        tuple(sorted(edge))
+                        for edge in (
+                            (lower, lower + 1),
+                            (lower, lower + width),
+                            (lower, lower + width + 1),
+                            (lower + 1, lower + width + 1),
+                            (lower + width, lower + width + 1),
+                        )
+                    }
+                )
+        edge_indices = np.asarray(sorted(edges), dtype=int)
+        rest_edges = np.linalg.norm(initial[edge_indices[:, 1]] - initial[edge_indices[:, 0]], axis=1)
+        final_edges = np.linalg.norm(final[edge_indices[:, 1]] - final[edge_indices[:, 0]], axis=1)
+        edge_ratios = np.divide(final_edges, rest_edges, out=np.ones_like(final_edges), where=rest_edges > 0.0)
+        triangle_indices = np.asarray(triangles, dtype=int)
+        rest_normals = np.cross(
+            initial[triangle_indices[:, 1]] - initial[triangle_indices[:, 0]],
+            initial[triangle_indices[:, 2]] - initial[triangle_indices[:, 0]],
+        )
+        final_normals = np.cross(
+            final[triangle_indices[:, 1]] - final[triangle_indices[:, 0]],
+            final[triangle_indices[:, 2]] - final[triangle_indices[:, 0]],
+        )
+        rest_areas = np.linalg.norm(rest_normals, axis=1)
+        final_areas = np.linalg.norm(final_normals, axis=1)
+        area_ratios = np.divide(final_areas, rest_areas, out=np.ones_like(final_areas), where=rest_areas > 0.0)
+        flipped = np.einsum("ij,ij->i", rest_normals, final_normals) < 0.0
+        return {
+            "min_edge_length_ratio": float(edge_ratios.min(initial=1.0)),
+            "max_edge_length_ratio": float(edge_ratios.max(initial=1.0)),
+            "min_triangle_area_ratio": float(area_ratios.min(initial=1.0)),
+            "max_triangle_area_ratio": float(area_ratios.max(initial=1.0)),
+            "flipped_triangle_count": int(np.count_nonzero(flipped)),
         }
 
     @staticmethod
@@ -477,7 +550,7 @@ class SceneExecutorLocal:
         state: Any,
         time_value: float,
         fired_impulses: set[str],
-    ) -> None:
+    ) -> int:
         forces = state.body_f.numpy() if state.body_f is not None else np.empty((0, 6), dtype=np.float32)
         velocities = state.body_qd.numpy() if state.body_qd is not None else np.empty((0, 6), dtype=np.float32)
         positions = state.body_q.numpy()[:, :3] if state.body_q is not None else np.empty((0, 3), dtype=np.float32)
@@ -654,6 +727,142 @@ class SceneExecutorLocal:
                 "message": "State velocity exceeded the energy safety bound.",
             }
         return None
+
+    def _project_cloth_triangle_contacts(
+        self, scene: Scene, compiled: Any, state_in: Any, state_out: Any, dt: float
+    ) -> None:
+        """Project cloth triangles out of simple rigid shapes after one solver step."""
+        if state_out.particle_q is None:
+            return 0
+        positions = state_out.particle_q.numpy()
+        velocities = state_out.particle_qd.numpy()
+        inverse_masses = compiled.model.particle_inv_mass.numpy()
+        body_q = state_out.body_q.numpy() if state_out.body_q is not None else np.empty((0, 7))
+        body_qd = state_out.body_qd.numpy() if state_out.body_qd is not None else np.empty((0, 6))
+        body_inv_mass = (
+            compiled.model.body_inv_mass.numpy() if compiled.model.body_inv_mass is not None else np.empty(0)
+        )
+        changed = False
+        body_changed = False
+        contact_count = 0
+        colliders: list[tuple[str, np.ndarray, np.ndarray, np.ndarray, int]] = []
+        if scene.render.ground:
+            colliders.append(("plane", np.zeros(3), np.array([1.0, 1.0, 0.0]), np.array([0, 0, 0, 1]), -1))
+        for object_id, item in scene.objects.items():
+            if not isinstance(item, ObjectRigid) or item.shape not in {"sphere", "box"}:
+                continue
+            body = compiled.body_indices.get(object_id, -1)
+            if body >= 0:
+                center = body_q[body, :3].copy()
+                rotation = body_q[body, 3:].copy()
+            else:
+                center = np.asarray(item.transform.position, dtype=float)
+                rotation = np.asarray(item.transform.rotation, dtype=float)
+            size = np.asarray(item.size, dtype=float) * np.asarray(item.transform.scale, dtype=float)
+            colliders.append((item.shape, center, size, rotation, body))
+        for object_id, indices in compiled.cloth_particle_indices.items():
+            cloth = scene.objects[object_id]
+            width, height = cloth.resolution
+            radius = cloth.collision_radius or cloth.thickness
+            offset = indices[0]
+            for y in range(height - 1):
+                for x in range(width - 1):
+                    lower = offset + y * width + x
+                    for triangle in ((lower, lower + 1, lower + width + 1), (lower, lower + width + 1, lower + width)):
+                        tri = positions[np.asarray(triangle)]
+                        for kind, center, size, rotation, body in colliders:
+                            correction, weights = self._triangle_shape_correction(
+                                tri, kind, center, size, rotation, radius
+                            )
+                            if correction is None:
+                                continue
+                            weights = weights * inverse_masses[np.asarray(triangle)]
+                            weight_sum = float(weights.sum())
+                            rigid_weight = float(body_inv_mass[body]) if body >= 0 else 0.0
+                            denominator = weight_sum + rigid_weight
+                            if denominator <= 0.0:
+                                continue
+                            normal = correction / max(float(np.linalg.norm(correction)), 1.0e-12)
+                            for vertex, weight in zip(triangle, weights, strict=True):
+                                positions[vertex] += correction * (weight / denominator)
+                                inward_speed = float(np.dot(velocities[vertex], normal))
+                                if inward_speed < 0.0:
+                                    velocities[vertex] -= normal * inward_speed
+                            if rigid_weight:
+                                body_q[body, :3] -= correction * (rigid_weight / denominator)
+                                body_changed = True
+                            changed = True
+                            contact_count += 1
+        if changed:
+            self._copy_array(state_out.particle_q, positions)
+            self._copy_array(state_out.particle_qd, velocities)
+        if body_changed:
+            self._copy_array(state_out.body_q, body_q)
+            self._copy_array(state_out.body_qd, body_qd)
+        return contact_count
+
+    @staticmethod
+    def _triangle_shape_correction(
+        triangle: np.ndarray,
+        kind: str,
+        center: np.ndarray,
+        size: np.ndarray,
+        rotation: np.ndarray,
+        radius: float,
+    ) -> tuple[np.ndarray | None, np.ndarray]:
+        """Return a separating translation [m] and triangle barycentric weights."""
+        samples = [(triangle.mean(axis=0), np.full(3, 1.0 / 3.0))]
+        best: tuple[np.ndarray, np.ndarray] | None = None
+        if kind == "plane":
+            for point, weights in samples:
+                depth = radius - point[2]
+                if depth > 0.0 and (best is None or depth > np.linalg.norm(best[0])):
+                    best = (np.array([0.0, 0.0, depth]), weights)
+            return best or (None, np.zeros(3))
+        xyz = rotation[:3]
+        scalar = rotation[3]
+
+        def rotate(vector: np.ndarray, inverse: bool = False) -> np.ndarray:
+            q = -xyz if inverse else xyz
+            return vector + 2.0 * (scalar * np.cross(q, vector) + np.cross(q, np.cross(q, vector)))
+
+        if kind == "sphere":
+            point, weights = SceneExecutorLocal._closest_triangle_point(center, triangle)
+            delta = point - center
+            distance = float(np.linalg.norm(delta))
+            limit = float(np.max(size) * 0.5 + radius)
+            if distance < limit:
+                normal = delta / distance if distance > 1.0e-9 else np.array([0.0, 0.0, 1.0])
+                return normal * (limit - distance), weights
+            return None, weights
+        half = size * 0.5 + radius
+        for point, weights in samples:
+            local = rotate(point - center, inverse=True)
+            depths = half - np.abs(local)
+            if np.all(depths > 0.0):
+                axis = int(np.argmin(depths))
+                local_correction = np.zeros(3)
+                local_correction[axis] = math.copysign(depths[axis], local[axis] or 1.0)
+                correction = rotate(local_correction)
+                if best is None or np.linalg.norm(correction) > np.linalg.norm(best[0]):
+                    best = correction, weights
+        return best or (None, np.zeros(3))
+
+    @staticmethod
+    def _closest_triangle_point(point: np.ndarray, triangle: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Return the closest point on a triangle and its barycentric weights."""
+        a, b, c = triangle
+        normal = np.cross(b - a, c - a)
+        matrix = np.column_stack((b - a, c - a, normal))
+        if abs(float(np.linalg.det(matrix))) < 1.0e-12:
+            distances = np.linalg.norm(triangle - point, axis=1)
+            index = int(np.argmin(distances))
+            return triangle[index], np.eye(3)[index]
+        uvw = np.linalg.solve(matrix, point - a)
+        weights = np.array([1.0 - uvw[0] - uvw[1], uvw[0], uvw[1]])
+        weights = np.maximum(weights, 0.0)
+        weights /= weights.sum()
+        return weights @ triangle, weights
 
     @staticmethod
     def _contact_penetrations(compiled: Any, state: Any, count: int) -> np.ndarray:

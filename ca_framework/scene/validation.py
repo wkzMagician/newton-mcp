@@ -415,9 +415,7 @@ def select_pipeline(scene: Scene) -> list[str]:
     cloth = [item for item in scene.objects.values() if isinstance(item, ObjectCloth)]
     if any(not isinstance(item, ObjectFluid) for item in scene.objects.values()):
         rigid_solver = "vbd" if any(item.self_collision for item in cloth) else "xpbd"
-        pipeline.append(
-            rigid_solver if scene.settings.solver in {"auto", "xpbd", "smoke", "apic"} else scene.settings.solver
-        )
+        pipeline.append(rigid_solver if scene.settings.solver in {"auto", "smoke", "apic"} else scene.settings.solver)
     phases = {item.phase for item in scene.objects.values() if isinstance(item, ObjectFluid)}
     if "smoke" in phases:
         pipeline.append("smoke")

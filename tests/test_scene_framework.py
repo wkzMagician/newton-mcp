@@ -540,6 +540,31 @@ class TestSceneFramework(unittest.TestCase):
         self.assertEqual(direct["metrics"]["first_contact_time"], exported["metrics"]["first_contact_time"])
         self.assertTrue(np.allclose(direct["trajectories"]["ball"], exported["trajectories"]["ball"]))
 
+    def test_triangle_contact_covers_sphere_box_and_plane(self):
+        triangle = np.array([[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]])
+        identity = np.array([0.0, 0.0, 0.0, 1.0])
+        sphere, sphere_weights = SceneExecutorLocal._triangle_shape_correction(
+            triangle, "sphere", np.array([0.0, 0.0, 0.1]), np.full(3, 0.4), identity, 0.01
+        )
+        box, box_weights = SceneExecutorLocal._triangle_shape_correction(
+            triangle, "box", np.array([0.0, 0.0, 0.0]), np.full(3, 0.2), identity, 0.01
+        )
+        plane, plane_weights = SceneExecutorLocal._triangle_shape_correction(
+            triangle - np.array([0.0, 0.0, 0.005]),
+            "plane",
+            np.zeros(3),
+            np.ones(3),
+            identity,
+            0.01,
+        )
+        for correction, weights in (
+            (sphere, sphere_weights),
+            (box, box_weights),
+            (plane, plane_weights),
+        ):
+            self.assertIsNotNone(correction)
+            self.assertAlmostEqual(float(weights.sum()), 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()
