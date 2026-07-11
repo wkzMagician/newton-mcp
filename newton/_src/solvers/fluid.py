@@ -547,7 +547,6 @@ class SolverFluidAPIC(SolverBase):
 
     def _project(self, dt: float) -> None:
         velocity = self.grid_velocity
-        spacing = float(np.mean(self.cell_size))
         self.divergence.fill(0.0)
         for axis in range(3):
             self.divergence += np.gradient(velocity[..., axis], self.cell_size[axis], axis=axis, edge_order=1)
@@ -555,21 +554,40 @@ class SolverFluidAPIC(SolverBase):
         self.pressure.fill(0.0)
         coordinates = np.indices(self.grid_resolution)
         parity = coordinates.sum(axis=0) & 1
-        scale = self.density * spacing * spacing / max(dt, 1.0e-8)
+        rhs = self.density * self.divergence / max(dt, 1.0e-8)
+
+        def shifted(values: np.ndarray, axis: int, direction: int, fill: float | bool) -> np.ndarray:
+            result = np.full_like(values, fill)
+            source = [slice(None)] * 3
+            destination = [slice(None)] * 3
+            if direction < 0:
+                source[axis] = slice(0, -1)
+                destination[axis] = slice(1, None)
+            else:
+                source[axis] = slice(1, None)
+                destination[axis] = slice(0, -1)
+            result[tuple(destination)] = values[tuple(source)]
+            return result
+
         for _ in range(self.pressure_iters):
             for color in (0, 1):
                 neighbour_sum = np.zeros_like(self.pressure)
+                diagonal = np.zeros_like(self.pressure)
                 for axis in range(3):
-                    lower = np.roll(self.pressure, 1, axis=axis)
-                    upper = np.roll(self.pressure, -1, axis=axis)
-                    boundary = [slice(None)] * 3
-                    boundary[axis] = 0
-                    lower[tuple(boundary)] = 0.0
-                    boundary[axis] = -1
-                    upper[tuple(boundary)] = 0.0
-                    neighbour_sum += lower + upper
-                candidate = (neighbour_sum - scale * self.divergence) / 6.0
-                mask = self.fluid & (parity == color)
+                    coefficient = 1.0 / self.cell_size[axis] ** 2
+                    for direction in (-1, 1):
+                        neighbour_pressure = shifted(self.pressure, axis, direction, 0.0)
+                        neighbour_solid = shifted(self.solid, axis, direction, True)
+                        open_face = ~neighbour_solid
+                        neighbour_sum += coefficient * neighbour_pressure * open_face
+                        diagonal += coefficient * open_face
+                candidate = np.divide(
+                    neighbour_sum - rhs,
+                    diagonal,
+                    out=np.zeros_like(self.pressure),
+                    where=diagonal > 0.0,
+                )
+                mask = self.fluid & (parity == color) & (diagonal > 0.0)
                 self.pressure[mask] = candidate[mask]
         gravity_z = abs(float(self.model.gravity.numpy()[0, 2]))
         if gravity_z:
@@ -582,7 +600,13 @@ class SolverFluidAPIC(SolverBase):
                         self.density * gravity_z * np.maximum(0.0, surface_z - z_centers[fluid_levels])
                     )
         for axis in range(3):
-            gradient = np.gradient(self.pressure, self.cell_size[axis], axis=axis, edge_order=1)
+            lower_pressure = shifted(self.pressure, axis, -1, 0.0)
+            upper_pressure = shifted(self.pressure, axis, 1, 0.0)
+            lower_solid = shifted(self.solid, axis, -1, True)
+            upper_solid = shifted(self.solid, axis, 1, True)
+            lower_pressure[lower_solid] = self.pressure[lower_solid]
+            upper_pressure[upper_solid] = self.pressure[upper_solid]
+            gradient = (upper_pressure - lower_pressure) / (2.0 * self.cell_size[axis])
             velocity[..., axis] -= dt * gradient / self.density
         velocity[~self.fluid] = 0.0
         velocity[self.solid] = self.solid_velocity[self.solid]
@@ -688,6 +712,15 @@ class SolverFluidAPIC(SolverBase):
         pic_velocities = self.grid_velocity[indices]
         flip_velocities = old_velocities + grid_delta[indices]
         velocities = (1.0 - self.flip_ratio) * pic_velocities + self.flip_ratio * flip_velocities
+        # Keep advection within half a grid cell per step. Besides satisfying
+        # the particle CFL condition, this bounds continuous-solid collision
+        # sampling and prevents one unstable pressure update from producing an
+        # unbounded number of trajectory samples.
+        maximum_speed = 0.5 * float(np.min(self.cell_size)) / max(dt, 1.0e-8)
+        speeds = np.linalg.norm(velocities, axis=1)
+        fast_velocity = speeds > maximum_speed
+        if np.any(fast_velocity):
+            velocities[fast_velocity] *= maximum_speed / speeds[fast_velocity, None]
         next_positions = positions + velocities * dt
         next_cells = np.floor((next_positions - self.domain_min) / self.cell_size).astype(int)
         next_cells = np.clip(next_cells, 0, np.asarray(self.grid_resolution) - 1)

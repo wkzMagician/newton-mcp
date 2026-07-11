@@ -15,7 +15,13 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from ca_framework.scene import Scene, SceneStore
-from ca_framework.scene.model import _action_from_dict, _constraint_from_dict, _field_from_dict, _object_from_dict
+from ca_framework.scene.model import (
+    Camera,
+    _action_from_dict,
+    _constraint_from_dict,
+    _field_from_dict,
+    _object_from_dict,
+)
 from ca_framework.scene.validation import validate_scene
 
 
@@ -77,7 +83,35 @@ class SceneTools:
             "solvers": {"rigid_and_cloth": "xpbd", "smoke": "smoke", "liquid": "apic"},
             "actions": ["transform", "impulse", "force", "emit"],
             "outputs": ["mp4", "scene-json", "python", "metrics", "diagnostics"],
+            "camera": {"modes": ["auto", "look-at"], "supports_up": True},
         }
+
+    def set_camera(
+        self,
+        scene_name: str,
+        *,
+        position: tuple[float, float, float],
+        target: tuple[float, float, float],
+        up: tuple[float, float, float] = (0.0, 0.0, 1.0),
+        field_of_view: float = 45.0,
+    ) -> dict[str, Any]:
+        """Set a fixed look-at camera for a scene."""
+        camera = Camera(
+            position=position,
+            target=target,
+            up=up,
+            field_of_view=field_of_view,
+            auto_frame=False,
+        )
+        scene = self.store.load(scene_name)
+        scene.render.camera = camera
+        report = validate_scene(scene)
+        if not report["valid"]:
+            camera_errors = [item for item in report["diagnostics"] if item["path"].startswith("render.camera")]
+            if camera_errors:
+                raise ValueError(f"Invalid camera: {camera_errors}")
+        self.store.save(scene)
+        return item_to_dict(camera)
 
     def add_object(self, scene_name: str, spec: dict[str, Any]) -> dict[str, Any]:
         """Add a rigid, cloth, or fluid object."""

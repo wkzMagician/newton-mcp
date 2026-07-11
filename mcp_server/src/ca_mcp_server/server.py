@@ -18,6 +18,7 @@ from ca_framework.scene import SceneExecutorLocal, SceneStore
 from .dto import (
     ActionPatchDTO,
     ActionSpecDTO,
+    CameraLookAtDTO,
     ConstraintPatchDTO,
     ConstraintSpecDTO,
     FieldPatchDTO,
@@ -69,6 +70,12 @@ def list_scenes() -> list[str]:
 def get_scene(name: str) -> dict[str, Any]:
     """Read a complete animation scene."""
     return _tools().get_scene(name)
+
+
+@mcp.tool()
+def set_camera(scene_name: str, camera: CameraLookAtDTO) -> dict[str, Any]:
+    """Set a fixed look-at camera; position and target use metres."""
+    return _tools().set_camera(scene_name, **camera.model_dump())
 
 
 @mcp.tool()

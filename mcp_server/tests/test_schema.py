@@ -96,6 +96,13 @@ class TestMcpSchema(unittest.TestCase):
         self.assertEqual(object_values["discriminator"]["propertyName"], "kind")
         self.assertIn("ObjectFluidDTO", scene_schema["$defs"])
 
+    def test_set_camera_exposes_typed_fixed_view(self):
+        schema = self.schemas["set_camera"]
+        camera = schema["properties"]["camera"]
+        self.assertEqual(camera["$ref"], "#/$defs/CameraLookAtDTO")
+        properties = schema["$defs"]["CameraLookAtDTO"]["properties"]
+        self.assertEqual(set(properties), {"position", "target", "up", "field_of_view"})
+
     def test_wire_validation_rejects_unknown_fields_and_bad_vectors(self):
         adapter = TypeAdapter(ObjectSpecDTO)
         with self.assertRaises(ValidationError):

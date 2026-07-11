@@ -424,7 +424,7 @@ class ScreenSpaceFluidRenderer:
             self._render_passes()
         except Exception as exc:
             self._failed = True
-            print(f"[SSFR] disabling screen-space fluid rendering: {exc}")
+            raise RuntimeError(f"Screen-space fluid rendering failed: {exc}") from exc
 
     def _ensure_initialized(self):
         if self._initialized:
@@ -468,11 +468,12 @@ class ScreenSpaceFluidRenderer:
         gl.glBindVertexArray(0)
         gl.glBindBuffer(gl.GL_ARRAY_BUFFER, 0)
 
-        self._particle_buffer = wp.RegisteredGLBuffer(
-            gl_buffer_id=_as_gl_id(self._particle_vbo),
-            device=self.device,
-            flags=wp.RegisteredGLBuffer.WRITE_DISCARD,
-        )
+        if self.device.is_cuda:
+            self._particle_buffer = wp.RegisteredGLBuffer(
+                gl_buffer_id=_as_gl_id(self._particle_vbo),
+                device=self.device,
+                flags=wp.RegisteredGLBuffer.WRITE_DISCARD,
+            )
 
         self._depth_fbo = gl.GLuint()
         gl.glGenFramebuffers(1, self._depth_fbo)
@@ -605,6 +606,21 @@ class ScreenSpaceFluidRenderer:
         if self._particle_count <= 0:
             return
 
+        if not self.device.is_cuda:
+            particles = np.empty((self._particle_count, 4), dtype=np.float32)
+            particles[:, :3] = points.numpy()
+            particles[:, 3] = self.particle_radius
+            self._gl.glBindBuffer(self._gl.GL_ARRAY_BUFFER, self._particle_vbo)
+            self._gl.glBufferSubData(
+                self._gl.GL_ARRAY_BUFFER,
+                0,
+                particles.nbytes,
+                particles.ctypes.data_as(ctypes.c_void_p),
+            )
+            self._gl.glBindBuffer(self._gl.GL_ARRAY_BUFFER, 0)
+            return
+
+        assert self._particle_buffer is not None
         mapped = self._particle_buffer.map(dtype=wp.vec4, shape=(self._particle_count,))
         wp.launch(
             pack_particle_centers_and_radius,

@@ -9,11 +9,14 @@ import time
 import unittest
 from pathlib import Path
 from threading import Event
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
 from ca_framework.mcp import SceneTools
 from ca_framework.scene import Scene, SceneExecutorLocal, SceneStore, validate_scene
+from ca_framework.scene.executor import _physics_validation
 from newton.solvers import SolverBase, SolverExercise5Fluid, SolverFluidAPIC, SolverFluidSmoke, SolverSemiImplicit
 from newton.viewer import ViewerFluidGL
 
@@ -49,6 +52,39 @@ class TestSceneFramework(unittest.TestCase):
         self.assertEqual(scene["objects"]["ball"]["shape"], "sphere")
         self.assertEqual(scene["fields"]["wind"]["object_ids"], ["ball"])
         self.assertEqual(SceneStore(self.root / "scenes").load("demo").name, "demo")
+
+    def test_set_camera_persists_valid_fixed_view(self):
+        camera = self.tools.set_camera(
+            "demo",
+            position=(3.0, -4.0, 2.0),
+            target=(0.0, 0.0, 0.5),
+            up=(0.0, 0.0, 1.0),
+            field_of_view=50.0,
+        )
+
+        self.assertFalse(camera["auto_frame"])
+        self.assertEqual(camera["position"], (3.0, -4.0, 2.0))
+        stored = self.tools.get_scene("demo")["render"]["camera"]
+        self.assertEqual(stored["position"], [3.0, -4.0, 2.0])
+        self.assertEqual(stored["target"], [0.0, 0.0, 0.5])
+        self.assertFalse(stored["auto_frame"])
+
+    def test_set_camera_rejects_degenerate_view(self):
+        with self.assertRaisesRegex(ValueError, "degenerate_camera"):
+            self.tools.set_camera("demo", position=(1.0, 1.0, 1.0), target=(1.0, 1.0, 1.0))
+
+    def test_physics_validation_rejects_instability_diagnostics(self):
+        result = _physics_validation(
+            [
+                {"code": "pressure_nonconvergence", "frame": 4},
+                {"code": "state_escape", "frame": 5},
+                {"code": "render_fallback", "frame": 5},
+            ]
+        )
+
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["failure_count"], 2)
+        self.assertEqual(result["failure_codes"], ["pressure_nonconvergence", "state_escape"])
 
     def test_rejects_dangling_references(self):
         self.tools.add_object("demo", {"id": "a", "kind": "rigid"})
@@ -190,6 +226,46 @@ class TestSceneFramework(unittest.TestCase):
         self.assertTrue(issubclass(SolverFluidAPIC, SolverBase))
         self.assertFalse(issubclass(SolverFluidAPIC, SolverSemiImplicit))
         self.assertIs(SolverExercise5Fluid, SolverFluidSmoke)
+
+    def test_formal_render_does_not_fall_back_when_opengl_fails(self):
+        scene = Scene(name="gpu-only")
+        cache = self.root / "cache"
+        frames = cache / "frames"
+        frames.mkdir(parents=True)
+        (cache / "manifest.json").write_text(json.dumps({"frames": 1}))
+        np.savez(frames / "000000.npz")
+
+        with patch.object(
+            SceneExecutorLocal,
+            "_render_cache_frames_gl",
+            side_effect=RuntimeError("no hardware OpenGL"),
+        ):
+            result = SceneExecutorLocal._encode_video(scene, self.root / "formal.mp4", cache)
+
+        self.assertEqual(result["status"], "render_failed")
+        self.assertEqual(result["diagnostics"][0]["code"], "opengl_render_failed")
+        self.assertIn("no hardware OpenGL", result["diagnostics"][0]["message"])
+        self.assertFalse((self.root / "formal.mp4").exists())
+
+    def test_cpu_simulation_uses_opengl_host_staging(self):
+        scene = Scene(name="cpu-gl")
+        output = self.root / "frames"
+        output.mkdir()
+        (self.root / "manifest.json").write_text(json.dumps({"frames": 1}))
+        metadata = {
+            "simulation_device": "cpu",
+            "render_backend": "opengl_hardware",
+            "render_data_path": "host_staging",
+            "render_equivalent": True,
+        }
+        with (
+            patch("ca_framework.scene.executor.wp.get_device", return_value=SimpleNamespace(is_cuda=False)),
+            patch.object(SceneExecutorLocal, "_render_cache_frames_gl", return_value=metadata) as render_gl,
+        ):
+            result = SceneExecutorLocal._render_cache_frames(scene, self.root, output)
+
+        render_gl.assert_called_once()
+        self.assertEqual(result, metadata)
 
     def test_compiler_resolves_cloth_selectors_and_container_transform(self):
         scene = Scene.from_dict(

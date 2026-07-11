@@ -1015,6 +1015,22 @@ class ViewerGL(ViewerBase):
         gl = RendererGL.gl
         w, h = self.renderer._screen_width, self.renderer._screen_height
 
+        if not self.device.is_cuda:
+            if target_image is not None and target_image.shape != (h, w, 3):
+                raise ValueError(f"Shape of `target_image` must be ({h}, {w}, 3), got {target_image.shape}")
+            assert self.renderer._frame_fbo is not None
+            pixels = (ctypes.c_ubyte * (w * h * 3))()
+            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self.renderer._frame_fbo)
+            gl.glPixelStorei(gl.GL_PACK_ALIGNMENT, 1)
+            gl.glReadPixels(0, 0, w, h, gl.GL_RGB, gl.GL_UNSIGNED_BYTE, pixels)
+            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
+            frame = np.ctypeslib.as_array(pixels).reshape(h, w, 3)[::-1].copy()
+            source = wp.array(frame, dtype=wp.uint8, device=self.device)
+            if target_image is None:
+                return source
+            wp.copy(target_image, source)
+            return target_image
+
         # Lazy initialization of PBO (Pixel Buffer Object).
         if self._pbo is None:
             pbo_id = (gl.GLuint * 1)()

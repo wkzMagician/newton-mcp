@@ -278,10 +278,19 @@ Action: TypeAlias = ActionTransform | ActionImpulse | ActionForce | ActionEmit
 
 @dataclass(slots=True)
 class Camera:
-    """Render camera; ``position`` and ``target`` are in metres."""
+    """Render camera using a look-at transform.
+
+    Attributes:
+        position: Camera position [m].
+        target: Look-at target [m].
+        up: Preferred image-up direction.
+        field_of_view: Vertical field of view [deg].
+        auto_frame: Whether the renderer may choose framing automatically.
+    """
 
     position: Vec3 | None = None
     target: Vec3 | None = None
+    up: Vec3 = (0.0, 0.0, 1.0)
     field_of_view: float = 45.0
     auto_frame: bool = True
 

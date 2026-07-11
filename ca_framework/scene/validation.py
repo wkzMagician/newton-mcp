@@ -10,6 +10,8 @@ from itertools import pairwise
 from math import isfinite, prod, sqrt
 from typing import Any, Literal
 
+import numpy as np
+
 from .model import (
     ActionEmit,
     ActionForce,
@@ -39,14 +41,20 @@ class SceneDiagnostic:
 def estimate_resources(scene: Scene) -> dict[str, int]:
     """Estimate particles, grid cells, and rendered frames."""
     particles = 0
+    initial_particles = 0
+    emitted_particles = 0
     grid_cells = 0
     for item in scene.objects.values():
         if isinstance(item, ObjectCloth):
-            particles += prod(item.resolution)
+            count = prod(item.resolution)
+            particles += count
+            initial_particles += count
         elif isinstance(item, ObjectFluid):
             grid_cells += prod(item.grid_resolution)
             if item.phase == "liquid" and item.particle_spacing > 0.0:
-                particles += prod(max(1, int(size / item.particle_spacing)) for size in item.size)
+                count = prod(max(1, int(size / item.particle_spacing)) for size in item.size)
+                particles += count
+                initial_particles += count
                 for emitter in item.emitters:
                     active_substeps = max(
                         0,
@@ -56,9 +64,9 @@ def estimate_resources(scene: Scene) -> dict[str, int]:
                             * scene.settings.substeps
                         ),
                     )
-                    particles += active_substeps * prod(
-                        max(1, int(size / item.particle_spacing)) for size in emitter.size
-                    )
+                    emitted = active_substeps * prod(max(1, int(size / item.particle_spacing)) for size in emitter.size)
+                    particles += emitted
+                    emitted_particles += emitted
     # MAC smoke/APIC grids store several scalar grids plus three face grids.
     # This deliberately overestimates rather than allowing jobs to OOM late.
     has_liquid = any(isinstance(item, ObjectFluid) and item.phase == "liquid" for item in scene.objects.values())
@@ -66,6 +74,9 @@ def estimate_resources(scene: Scene) -> dict[str, int]:
     estimated_bytes = particle_capacity * 64 + grid_cells * 64
     return {
         "particles": particles,
+        "estimated_initial_particles": initial_particles,
+        "estimated_emitted_particles": emitted_particles,
+        "particle_capacity": scene.settings.max_particles if has_liquid else particles,
         "grid_cells": grid_cells,
         "simulation_frames": round(scene.settings.duration * scene.settings.fps),
         "render_frames": round(scene.settings.duration * scene.render.fps),
@@ -349,6 +360,46 @@ def validate_scene(scene: Scene) -> dict[str, Any]:
                         "Separate the initial transforms or use an enclosing container intentionally.",
                         "warning",
                     )
+
+    camera = scene.render.camera
+    if not 0.0 < camera.field_of_view < 180.0:
+        error(
+            "render.camera.field_of_view",
+            "invalid_camera_fov",
+            "Camera field of view must be between 0 and 180 degrees.",
+            "Choose a field of view such as 45 degrees.",
+        )
+    if (camera.position is None) != (camera.target is None):
+        error(
+            "render.camera",
+            "incomplete_camera",
+            "Camera position and target must be supplied together.",
+            "Set both values or enable automatic framing.",
+        )
+    if camera.position is not None and camera.target is not None:
+        view = np.asarray(camera.target, dtype=float) - np.asarray(camera.position, dtype=float)
+        up = np.asarray(camera.up, dtype=float)
+        if np.linalg.norm(view) < 1.0e-8:
+            error(
+                "render.camera.target",
+                "degenerate_camera",
+                "Camera position and target must differ.",
+                "Move the camera away from its target.",
+            )
+        if np.linalg.norm(up) < 1.0e-8:
+            error(
+                "render.camera.up",
+                "degenerate_camera_up",
+                "Camera up vector must be non-zero.",
+                "Use an axis such as [0, 0, 1].",
+            )
+        elif np.linalg.norm(view) >= 1.0e-8 and np.linalg.norm(np.cross(view, up)) < 1.0e-8:
+            error(
+                "render.camera.up",
+                "parallel_camera_up",
+                "Camera up vector must not be parallel to the view direction.",
+                "Choose a perpendicular up vector.",
+            )
 
     return {
         "valid": not any(item.severity == "error" for item in findings),

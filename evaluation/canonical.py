@@ -75,7 +75,7 @@ def canonical_scenes() -> dict[str, Scene]:
                     "point": [0.0, 0.0, 0.35],
                 }
             },
-            "settings": {"duration": 2.0, "fps": 40, "substeps": 5},
+            "settings": {"duration": 2.0, "fps": 40, "substeps": 8},
         },
         "03_ramp_bounce": {
             "objects": {
@@ -116,6 +116,8 @@ def canonical_scenes() -> dict[str, Scene]:
                     "resolution": [13, 13],
                     "surface_density": 5.0,
                     "thickness": 0.025,
+                    "stretch_stiffness": 200.0,
+                    "damping": 2.0,
                     "transform": {"position": [-1.0, -1.0, 1.2]},
                     "pinned": [
                         {"kind": "uv-corners", "corners": ["bottom-left", "bottom-right", "top-left", "top-right"]}
@@ -129,7 +131,7 @@ def canonical_scenes() -> dict[str, Scene]:
                     "transform": {"position": [0.0, 0.0, 2.2]},
                 },
             },
-            "settings": {"duration": 1.2, "fps": 30, "substeps": 5},
+            "settings": {"duration": 1.2, "fps": 30, "substeps": 12},
         },
         "05_hanging_cloth": {
             "objects": {
@@ -158,7 +160,15 @@ def canonical_scenes() -> dict[str, Scene]:
                 }
             },
             "settings": {"duration": 3.0, "fps": 30, "substeps": 8},
-            "render": {"ground": False},
+            "render": {
+                "ground": False,
+                "camera": {
+                    "position": [0.0, -4.0, 1.5],
+                    "target": [0.0, 0.0, 1.5],
+                    "up": [0.0, 0.0, 1.0],
+                    "auto_frame": False,
+                },
+            },
         },
         "06_cloth_blocks": {
             "objects": {
@@ -229,17 +239,25 @@ def canonical_scenes() -> dict[str, Scene]:
                 },
             },
             "settings": {"duration": 2.5, "fps": 20, "substeps": 1},
-            "render": {"ground": False},
+            "render": {
+                "ground": False,
+                "camera": {
+                    "position": [0.0, -4.0, 1.0],
+                    "target": [0.0, 0.0, 1.0],
+                    "up": [0.0, 0.0, 1.0],
+                    "auto_frame": False,
+                },
+            },
         },
         "08_liquid_pour": {
             "objects": {
                 "left": {
                     "id": "left",
                     "kind": "container",
-                    "motion": "kinematic",
+                    "motion": "static",
                     "inner_size": [0.9, 0.8, 0.9],
                     "wall_thickness": 0.06,
-                    "transform": {"position": [-0.7, 0.0, 0.1]},
+                    "transform": {"position": [-0.5, 0.0, 0.8], "rotation": _quat_y(0.7)},
                 },
                 "right": {
                     "id": "right",
@@ -253,26 +271,31 @@ def canonical_scenes() -> dict[str, Scene]:
                     "id": "water",
                     "kind": "fluid",
                     "phase": "liquid",
-                    "size": [0.65, 0.6, 0.5],
+                    "size": [0.2, 0.4, 0.2],
                     "grid_resolution": [24, 12, 16],
                     "particle_spacing": 0.12,
-                    "transform": {"position": [-0.7, 0.0, 0.38]},
+                    "transform": {"position": [0.2, 0.0, 1.15]},
+                    "emitters": [
+                        {
+                            "position": [0.2, 0.0, 1.15],
+                            "size": [0.2, 0.4, 0.2],
+                            "start_time": 0.0,
+                            "end_time": 0.6,
+                            "velocity": [0.8, 0.0, -0.3],
+                        }
+                    ],
                 },
             },
-            "actions": {
-                "tilt": {
-                    "id": "tilt",
-                    "kind": "transform",
-                    "object_id": "left",
-                    "keyframes": [
-                        {"time": 0.0, "transform": {"position": [-0.7, 0.0, 0.1]}},
-                        {"time": 0.2, "transform": {"position": [0.8, 0.0, 2.0], "rotation": _quat_y(1.15)}},
-                        {"time": 2.8, "transform": {"position": [0.8, 0.0, 2.0], "rotation": _quat_y(1.15)}},
-                    ],
-                }
-            },
             "settings": {"duration": 3.0, "fps": 20, "substeps": 2, "max_particles": 10000},
-            "render": {"ground": False},
+            "render": {
+                "ground": False,
+                "camera": {
+                    "position": [0.0, -4.0, 0.8],
+                    "target": [0.0, 0.0, 0.8],
+                    "up": [0.0, 0.0, 1.0],
+                    "auto_frame": False,
+                },
+            },
         },
         "09_liquid_splash": {
             "objects": {
@@ -302,7 +325,15 @@ def canonical_scenes() -> dict[str, Scene]:
                 },
             },
             "settings": {"duration": 1.5, "fps": 25, "substeps": 2, "max_particles": 12000},
-            "render": {"ground": False},
+            "render": {
+                "ground": False,
+                "camera": {
+                    "position": [0.0, -4.0, 0.7],
+                    "target": [0.0, 0.0, 0.7],
+                    "up": [0.0, 0.0, 1.0],
+                    "auto_frame": False,
+                },
+            },
         },
         "10_floating_blocks": {
             "objects": {
@@ -335,7 +366,15 @@ def canonical_scenes() -> dict[str, Scene]:
                 },
             },
             "settings": {"duration": 2.0, "fps": 20, "substeps": 2, "max_particles": 15000},
-            "render": {"ground": False},
+            "render": {
+                "ground": False,
+                "camera": {
+                    "position": [0.0, -4.0, 0.65],
+                    "target": [0.0, 0.0, 0.65],
+                    "up": [0.0, 0.0, 1.0],
+                    "auto_frame": False,
+                },
+            },
         },
     }
     return {name: Scene.from_dict({"name": name, "schema_version": 2, **payload}) for name, payload in scenes.items()}

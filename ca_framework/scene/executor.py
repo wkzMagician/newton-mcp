@@ -42,6 +42,28 @@ class _SimulationCancelled(Exception):
     """Internal cooperative-cancellation signal."""
 
 
+_PHYSICS_FAILURE_CODES = frozenset(
+    {
+        "state_escape",
+        "non_finite_state",
+        "energy_explosion",
+        "pressure_nonconvergence",
+        "particle_capacity_overflow",
+        "contact_capacity_overflow",
+    }
+)
+
+
+def _physics_validation(diagnostics: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize diagnostics that invalidate simulated physics."""
+    failures = [item for item in diagnostics if item.get("code") in _PHYSICS_FAILURE_CODES]
+    return {
+        "valid": not failures,
+        "failure_count": len(failures),
+        "failure_codes": sorted({str(item["code"]) for item in failures}),
+    }
+
+
 class SceneExecutorLocal:
     """Deterministic local executor using Newton public solver routes."""
 
@@ -76,19 +98,36 @@ class SceneExecutorLocal:
         diagnostics: list[dict[str, Any]] = []
         contact_count = 0
         rigid_contact_count = 0
+        rigid_contact_candidate_count = 0
+        active_rigid_contact_count = 0
         soft_contact_count = 0
         first_contact_time: float | None = None
         max_penetration = 0.0
+        max_soft_penetration = 0.0
         first_contact_times: dict[str, float] = {}
         first_pair_contact_times: dict[str, float] = {}
         first_contact_pair_times: dict[str, float] = {}
+        first_active_contact_pair_times: dict[str, float] = {}
         contact_pairs: set[tuple[str, str]] = set()
-        body_objects = {body: object_id for object_id, body in compiled.body_indices.items()}
-        shape_bodies = compiled.model.shape_body.numpy() if compiled.model.shape_body is not None else np.empty(0)
+        active_contact_pairs: set[tuple[str, str]] = set()
+        soft_contact_pairs: set[tuple[str, str]] = set()
+        shape_objects = {shape: object_id for object_id, shapes in compiled.shape_indices.items() for shape in shapes}
+        particle_objects = {
+            particle: object_id
+            for object_id, particles in compiled.cloth_particle_indices.items()
+            for particle in particles
+        }
         fired_impulses: set[str] = set()
         state_frames: list[dict[str, np.ndarray]] = []
         contact_records: list[dict[str, Any]] = []
+        divergence_history: dict[str, list[float]] = {key: [] for key in compiled.fluid_solvers}
+        fluid_mass_history: dict[str, list[float]] = {key: [] for key in compiled.fluid_solvers}
+        max_body_linear_speed = 0.0
+        max_body_angular_speed = 0.0
+        max_particle_speed = 0.0
         state_in, state_out = compiled.state_0, compiled.state_1
+        initial_particle_q = state_in.particle_q.numpy().copy() if state_in.particle_q is not None else np.empty((0, 3))
+        completed_frames = 0
         for frame_index in range(frame_count):
             for substep_index in range(scene.settings.substeps):
                 if cancel_event is not None and cancel_event.is_set():
@@ -101,12 +140,26 @@ class SceneExecutorLocal:
                 compiled.model.collide(state_in, compiled.contacts)
                 current_contacts = int(compiled.contacts.rigid_contact_count.numpy()[0])
                 current_soft_contacts = int(compiled.contacts.soft_contact_count.numpy()[0])
+                if current_soft_contacts:
+                    soft_penetrations = self._soft_contact_penetrations(compiled, state_in, current_soft_contacts)
+                    max_soft_penetration = max(max_soft_penetration, float(soft_penetrations.max(initial=0.0)))
+                    soft_particles = compiled.contacts.soft_contact_particle.numpy()[:current_soft_contacts]
+                    soft_shapes = compiled.contacts.soft_contact_shape.numpy()[:current_soft_contacts]
+                    for particle, shape in zip(soft_particles, soft_shapes, strict=True):
+                        particle_object = particle_objects.get(int(particle))
+                        shape_object = shape_objects.get(int(shape))
+                        if particle_object is not None and shape_object is not None:
+                            soft_contact_pairs.add(tuple(sorted((particle_object, shape_object))))
+                rigid_contact_candidate_count += current_contacts
                 if current_contacts:
-                    max_penetration = max(
-                        max_penetration,
-                        self._max_contact_penetration(compiled, state_in, current_contacts),
-                    )
+                    penetrations = self._contact_penetrations(compiled, state_in, current_contacts)
+                    active_contact_indices = np.flatnonzero(penetrations >= 0.0)
+                    max_penetration = max(max_penetration, float(penetrations[active_contact_indices].max(initial=0.0)))
+                else:
+                    active_contact_indices = np.empty(0, dtype=int)
+                active_contacts = len(active_contact_indices)
                 rigid_contact_count += current_contacts
+                active_rigid_contact_count += active_contacts
                 soft_contact_count += current_soft_contacts
                 contact_count += current_contacts + current_soft_contacts
                 if (current_contacts or current_soft_contacts) and first_contact_time is None:
@@ -115,15 +168,21 @@ class SceneExecutorLocal:
                     shapes_a = compiled.contacts.rigid_contact_shape0.numpy()[:current_contacts]
                     shapes_b = compiled.contacts.rigid_contact_shape1.numpy()[:current_contacts]
                     pairs = []
-                    for shape_a, shape_b in zip(shapes_a, shapes_b, strict=True):
-                        object_a = body_objects.get(int(shape_bodies[shape_a])) if shape_a >= 0 else None
-                        object_b = body_objects.get(int(shape_bodies[shape_b])) if shape_b >= 0 else None
+                    active_index_set = set(active_contact_indices.tolist())
+                    for contact_index, (shape_a, shape_b) in enumerate(zip(shapes_a, shapes_b, strict=True)):
+                        object_a = shape_objects.get(int(shape_a))
+                        object_b = shape_objects.get(int(shape_b))
                         for object_id in (object_a, object_b):
                             if object_id is not None:
                                 first_contact_times.setdefault(object_id, time_value)
                         if object_a is not None and object_b is not None and object_a != object_b:
-                            contact_pairs.add(tuple(sorted((object_a, object_b))))
+                            pair = tuple(sorted((object_a, object_b)))
+                            contact_pairs.add(pair)
+                            if contact_index in active_index_set:
+                                active_contact_pairs.add(pair)
                             pair_key = "|".join(sorted((object_a, object_b)))
+                            if contact_index in active_index_set:
+                                first_active_contact_pair_times.setdefault(pair_key, time_value)
                             first_contact_pair_times.setdefault(pair_key, time_value)
                             first_pair_contact_times.setdefault(object_a, time_value)
                             first_pair_contact_times.setdefault(object_b, time_value)
@@ -133,7 +192,9 @@ class SceneExecutorLocal:
                             "frame": frame_index,
                             "substep": substep_index,
                             "time": time_value,
-                            "count": current_contacts,
+                            "candidate_count": current_contacts,
+                            "count": active_contacts,
+                            "max_penetration": float(penetrations[active_contact_indices].max(initial=0.0)),
                             "object_pairs": pairs,
                         }
                     )
@@ -152,16 +213,32 @@ class SceneExecutorLocal:
             if state_in.body_q is not None:
                 frame_state["body_q"] = state_in.body_q.numpy().astype(np.float32)
                 frame_state["body_qd"] = state_in.body_qd.numpy().astype(np.float32)
+                max_body_linear_speed = max(
+                    max_body_linear_speed,
+                    float(np.linalg.norm(frame_state["body_qd"][:, :3], axis=1).max(initial=0.0)),
+                )
+                max_body_angular_speed = max(
+                    max_body_angular_speed,
+                    float(np.linalg.norm(frame_state["body_qd"][:, 3:], axis=1).max(initial=0.0)),
+                )
             if state_in.particle_q is not None:
                 frame_state["cloth_q"] = state_in.particle_q.numpy().astype(np.float32)
                 frame_state["cloth_qd"] = state_in.particle_qd.numpy().astype(np.float32)
+                max_particle_speed = max(
+                    max_particle_speed,
+                    float(np.linalg.norm(frame_state["cloth_qd"], axis=1).max(initial=0.0)),
+                )
             for object_id, solver in compiled.fluid_solvers.items():
                 if scene.objects[object_id].phase == "smoke":
                     frame_state[f"{object_id}_density"] = solver.density.numpy().astype(np.float32)
+                    fluid_mass_history[object_id].append(float(frame_state[f"{object_id}_density"].sum()))
                 else:
                     frame_state[f"{object_id}_particles"] = solver.particle_position[: solver.particle_count].copy()
                     frame_state[f"{object_id}_velocities"] = solver.particle_velocity[: solver.particle_count].copy()
                     frame_state[f"{object_id}_masses"] = solver.particle_mass[: solver.particle_count].copy()
+                    fluid_mass_history[object_id].append(float(frame_state[f"{object_id}_masses"].sum()))
+                divergence = solver.divergence.numpy() if hasattr(solver.divergence, "numpy") else solver.divergence
+                divergence_history[object_id].append(float(np.max(np.abs(divergence), initial=0.0)))
             if capture_cache:
                 state_frames.append(frame_state)
             if frame_callback is not None:
@@ -175,6 +252,7 @@ class SceneExecutorLocal:
                         },
                     },
                 )
+            completed_frames = frame_index + 1
             issue = self._state_diagnostic(state_in, frame_index)
             if issue is not None:
                 diagnostics.append(issue)
@@ -259,27 +337,67 @@ class SceneExecutorLocal:
                             and np.isfinite(solver.pressure).all()
                         ),
                     )
+                mass_samples = fluid_mass_history[object_id]
+                initial_mass = mass_samples[0] if mass_samples else 0.0
+                final_mass = mass_samples[-1] if mass_samples else 0.0
+                stats.update(
+                    initial_mass=initial_mass,
+                    final_mass=final_mass,
+                    relative_mass_change=(final_mass - initial_mass) / initial_mass if initial_mass > 0.0 else 0.0,
+                    divergence_history=divergence_history[object_id],
+                    peak_divergence=max(divergence_history[object_id], default=0.0),
+                    mass_conservation_applicable=not item.emitters,
+                )
                 fluid_stats[object_id] = stats
+        cloth_stats = {}
+        final_particle_q = state_in.particle_q.numpy() if state_in.particle_q is not None else np.empty((0, 3))
+        final_particle_qd = state_in.particle_qd.numpy() if state_in.particle_qd is not None else np.empty((0, 3))
+        for object_id, indices in compiled.cloth_particle_indices.items():
+            selected = np.asarray(indices, dtype=int)
+            initial = initial_particle_q[selected]
+            final = final_particle_q[selected]
+            velocities = final_particle_qd[selected]
+            cloth_stats[object_id] = {
+                "finite": bool(np.isfinite(final).all() and np.isfinite(velocities).all()),
+                "max_displacement": float(np.linalg.norm(final - initial, axis=1).max(initial=0.0)),
+                "max_speed": float(np.linalg.norm(velocities, axis=1).max(initial=0.0)),
+                "bounds_min": final.min(axis=0).tolist(),
+                "bounds_max": final.max(axis=0).tolist(),
+            }
+        physics = _physics_validation(diagnostics)
         return {
-            "status": "completed",
+            "status": "completed" if physics["valid"] else "physics_failed",
             "scene": scene.name,
             "scene_hash": scene_hash,
-            "frames": frame_count,
+            "frames": completed_frames,
             "backend": "newton",
             "pipeline": compiled.pipeline,
             "metrics": {
                 "contacts": contact_count,
                 "rigid_contacts": rigid_contact_count,
+                "rigid_contact_candidates": rigid_contact_candidate_count,
+                "active_rigid_contacts": active_rigid_contact_count,
                 "soft_contacts": soft_contact_count,
                 "first_contact_time": first_contact_time,
                 "max_penetration": max_penetration,
-                "solver_residual": max_penetration,
+                "max_soft_penetration": max_soft_penetration,
+                "solver_residual": None,
                 "first_contact_times": first_contact_times,
                 "first_pair_contact_times": first_pair_contact_times,
                 "first_contact_pair_times": first_contact_pair_times,
+                "first_active_contact_pair_times": first_active_contact_pair_times,
                 "contact_pairs": [list(pair) for pair in sorted(contact_pairs)],
+                "active_contact_pairs": [list(pair) for pair in sorted(active_contact_pairs)],
+                "soft_contact_pairs": [list(pair) for pair in sorted(soft_contact_pairs)],
                 "fluid": fluid_stats,
+                "cloth": cloth_stats,
+                "kinematics": {
+                    "max_body_linear_speed": max_body_linear_speed,
+                    "max_body_angular_speed": max_body_angular_speed,
+                    "max_particle_speed": max_particle_speed,
+                },
                 "resources": estimate_resources(scene),
+                "physics": physics,
             },
             "trajectories": trajectories,
             "diagnostics": diagnostics,
@@ -526,7 +644,8 @@ class SceneExecutorLocal:
         return None
 
     @staticmethod
-    def _max_contact_penetration(compiled: Any, state: Any, count: int) -> float:
+    def _contact_penetrations(compiled: Any, state: Any, count: int) -> np.ndarray:
+        """Return signed penetration depths for collision candidates [m]."""
         contacts = compiled.contacts
         shape_a = contacts.rigid_contact_shape0.numpy()[:count]
         shape_b = contacts.rigid_contact_shape1.numpy()[:count]
@@ -538,6 +657,8 @@ class SceneExecutorLocal:
         transforms = state.body_q.numpy() if state.body_q is not None else np.empty((0, 7))
 
         def world_point(point: np.ndarray, shape: int) -> np.ndarray:
+            if shape < 0:
+                return point
             body = int(shape_bodies[shape])
             if body < 0:
                 return point
@@ -546,13 +667,41 @@ class SceneExecutorLocal:
             rotated = point + 2.0 * (transform[6] * np.cross(xyz, point) + np.cross(xyz, np.cross(xyz, point)))
             return transform[:3] + rotated
 
-        penetration = 0.0
+        penetrations = np.empty(count, dtype=np.float64)
         for index in range(count):
             a = world_point(point_a[index], int(shape_a[index]))
             b = world_point(point_b[index], int(shape_b[index]))
             distance = float(np.dot(-normal[index], b - a) - margin[index])
-            penetration = max(penetration, -distance)
-        return penetration
+            penetrations[index] = -distance
+        return penetrations
+
+    @staticmethod
+    def _soft_contact_penetrations(compiled: Any, state: Any, count: int) -> np.ndarray:
+        """Return non-negative cloth/shape penetration depths [m]."""
+        contacts = compiled.contacts
+        particles = contacts.soft_contact_particle.numpy()[:count]
+        shapes = contacts.soft_contact_shape.numpy()[:count]
+        body_points = contacts.soft_contact_body_pos.numpy()[:count]
+        normals = contacts.soft_contact_normal.numpy()[:count]
+        positions = state.particle_q.numpy()
+        radii = compiled.model.particle_radius.numpy()
+        shape_bodies = compiled.model.shape_body.numpy()
+        body_transforms = state.body_q.numpy() if state.body_q is not None else np.empty((0, 7))
+        penetrations = np.zeros(count, dtype=np.float64)
+        for index, (particle, shape) in enumerate(zip(particles, shapes, strict=True)):
+            body = int(shape_bodies[shape])
+            body_point = body_points[index]
+            if body >= 0:
+                transform = body_transforms[body]
+                xyz = transform[3:6]
+                body_point = (
+                    transform[:3]
+                    + body_point
+                    + 2.0 * (transform[6] * np.cross(xyz, body_point) + np.cross(xyz, np.cross(xyz, body_point)))
+                )
+            separation = float(np.dot(normals[index], positions[particle] - body_point) - radii[particle])
+            penetrations[index] = max(0.0, -separation)
+        return penetrations
 
     def preview(self, scene: Scene, *, frames: int | None = None) -> dict[str, Any]:
         """Run a short, reduced-cost simulation and return sampled keyframes."""
@@ -631,9 +780,18 @@ class SceneExecutorLocal:
         with tempfile.TemporaryDirectory() as temporary:
             temporary_path = Path(temporary)
             if cache_dir is not None:
-                SceneExecutorLocal._render_cache_frames(scene, cache_dir, temporary_path)
+                try:
+                    render_metadata = SceneExecutorLocal._render_cache_frames(scene, cache_dir, temporary_path)
+                except Exception as exc:
+                    output.unlink(missing_ok=True)
+                    return {
+                        "status": "render_failed",
+                        "output": str(output),
+                        "diagnostics": [{"code": "opengl_render_failed", "message": str(exc)}],
+                    }
                 input_arguments = ["-framerate", str(scene.render.fps), "-i", str(temporary_path / "frame-%06d.ppm")]
             else:
+                render_metadata = {}
                 frame = temporary_path / "frame-000000.ppm"
                 frame.write_bytes(f"P6\n{width} {height}\n255\n".encode() + bytes((28, 31, 38)) * width * height)
                 input_arguments = ["-loop", "1", "-i", str(frame), "-t", str(scene.settings.duration)]
@@ -664,18 +822,18 @@ class SceneExecutorLocal:
             "status": "completed",
             "output": str(output),
             "render_frames": round(scene.settings.duration * scene.render.fps),
+            **render_metadata,
         }
 
     @staticmethod
-    def _render_cache_frames(scene: Scene, cache_dir: Path, output_dir: Path) -> None:
+    def _render_cache_frames(scene: Scene, cache_dir: Path, output_dir: Path) -> dict[str, Any]:
         """Rasterize cached bodies, cloth, smoke, and liquid without simulation."""
         cache_manifest = json.loads((cache_dir / "manifest.json").read_text(encoding="utf-8"))
         simulation_frames = cache_manifest["frames"]
         if simulation_frames <= 0:
             raise ValueError("Cannot render an empty simulation cache")
         frame_paths = [cache_dir / "frames" / f"{index:06d}.npz" for index in range(simulation_frames)]
-        if SceneExecutorLocal._render_cache_frames_gl(scene, frame_paths, output_dir):
-            return
+        return SceneExecutorLocal._render_cache_frames_gl(scene, frame_paths, output_dir)
         bounds_points = []
         for frame_path in frame_paths:
             with np.load(frame_path) as state:
@@ -687,16 +845,28 @@ class SceneExecutorLocal:
                         bounds_points.append(values.reshape(-1, 3))
         for item in scene.objects.values():
             bounds_points.append(np.asarray(item.transform.position, dtype=np.float32).reshape(1, 3))
+            object_size = getattr(item, "size", getattr(item, "inner_size", None))
+            if object_size is not None and len(object_size) == 3:
+                center = np.asarray(item.transform.position, dtype=np.float32)
+                half_extent = np.asarray(object_size, dtype=np.float32) * np.asarray(item.transform.scale) * 0.5
+                if isinstance(item, ObjectContainer):
+                    center = center + np.asarray([0.0, 0.0, half_extent[2]])
+                bounds_points.append(
+                    np.asarray(
+                        [center + (np.asarray(signs) * 2.0 - 1.0) * half_extent for signs in np.ndindex(2, 2, 2)]
+                    )
+                )
         points = np.concatenate(bounds_points) if bounds_points else np.asarray([[0.0, 0.0, 0.0]])
         camera = scene.render.camera
         if camera.position is not None and camera.target is not None:
             view = np.asarray(camera.target, dtype=float) - np.asarray(camera.position, dtype=float)
             view /= max(np.linalg.norm(view), 1.0e-8)
-            right = np.cross(view, np.asarray([0.0, 0.0, 1.0]))
+            right = np.cross(view, np.asarray(camera.up, dtype=float))
             if np.linalg.norm(right) < 1.0e-6:
                 right = np.asarray([1.0, 0.0, 0.0])
             right /= np.linalg.norm(right)
             camera_up = np.cross(right, view)
+            camera_up /= max(np.linalg.norm(camera_up), 1.0e-8)
 
             def project_position(position: np.ndarray) -> np.ndarray:
                 relative = position - np.asarray(camera.position)
@@ -739,20 +909,82 @@ class SceneExecutorLocal:
             mask = (xx - x) ** 2 + (yy - y) ** 2 <= radius * radius
             image[y0:y1, x0:x1][mask] = color
 
+        def draw_line(
+            image: np.ndarray,
+            start: tuple[int, int],
+            end: tuple[int, int],
+            color: tuple[int, int, int],
+            thickness: int = 1,
+        ) -> None:
+            count = max(abs(end[0] - start[0]), abs(end[1] - start[1]), 1) + 1
+            xs = np.linspace(start[0], end[0], count).astype(int)
+            ys = np.linspace(start[1], end[1], count).astype(int)
+            for offset_x in range(-thickness + 1, thickness):
+                for offset_y in range(-thickness + 1, thickness):
+                    valid = (
+                        (xs + offset_x >= 0) & (xs + offset_x < width) & (ys + offset_y >= 0) & (ys + offset_y < height)
+                    )
+                    image[ys[valid] + offset_y, xs[valid] + offset_x] = color
+
+        def object_bounds(item: ObjectRigid | ObjectContainer, position: np.ndarray) -> tuple[int, int, int, int]:
+            size = np.asarray(item.size if isinstance(item, ObjectRigid) else item.inner_size, dtype=float)
+            center = np.asarray(position, dtype=float)
+            if isinstance(item, ObjectContainer):
+                center = center + np.asarray([0.0, 0.0, size[2] * 0.5])
+            corners = [
+                center + (np.asarray(signs, dtype=float) * 2.0 - 1.0) * size * 0.5 for signs in np.ndindex(2, 2, 2)
+            ]
+            pixels = np.asarray([pixel(corner) for corner in corners])
+            return int(pixels[:, 0].min()), int(pixels[:, 1].min()), int(pixels[:, 0].max()), int(pixels[:, 1].max())
+
+        def draw_object(image: np.ndarray, item: ObjectRigid | ObjectContainer, position: np.ndarray) -> None:
+            color = tuple(int(255 * value) for value in item.visual_material.color[:3])
+            x0, y0, x1, y1 = object_bounds(item, position)
+            if isinstance(item, ObjectRigid) and item.shape == "sphere":
+                draw_disc(image, pixel(position), max(3, min(x1 - x0, y1 - y0) // 2), color)
+            elif isinstance(item, ObjectContainer):
+                draw_line(image, (x0, y0), (x0, y1), color, 2)
+                draw_line(image, (x0, y1), (x1, y1), color, 2)
+                draw_line(image, (x1, y1), (x1, y0), color, 2)
+            else:
+                x0, x1 = max(0, x0), min(width - 1, x1)
+                y0, y1 = max(0, y0), min(height - 1, y1)
+                if x1 >= x0 and y1 >= y0:
+                    image[y0 : y1 + 1, x0 : x1 + 1] = color
+
         for render_index in range(render_frames):
             simulation_index = min(simulation_frames - 1, render_index * simulation_frames // render_frames)
             image = np.empty((height, width, 3), dtype=np.uint8)
             image[:] = (28, 31, 38)
             with np.load(frame_paths[simulation_index]) as state:
+                for item in scene.objects.values():
+                    if isinstance(item, (ObjectRigid, ObjectContainer)) and item.motion == "static":
+                        draw_object(image, item, np.asarray(item.transform.position))
                 if "body_q" in state:
                     for item, transform in zip(body_items, state["body_q"], strict=False):
-                        color = tuple(int(255 * value) for value in item.visual_material.color[:3])
-                        object_size = getattr(item, "size", getattr(item, "inner_size", (0.1,)))
-                        radius = max(3, int(max(object_size) / (maximum[0] - minimum[0]) * width * 0.4))
-                        draw_disc(image, pixel(transform[:3]), radius, color)
+                        draw_object(image, item, transform[:3])
                 if "cloth_q" in state:
-                    for position in state["cloth_q"]:
-                        draw_disc(image, pixel(position), 2, (210, 110, 80))
+                    offset = 0
+                    for item in scene.objects.values():
+                        if not isinstance(item, ObjectCloth):
+                            continue
+                        count = item.resolution[0] * item.resolution[1]
+                        positions = state["cloth_q"][offset : offset + count]
+                        for row in range(item.resolution[1]):
+                            for column in range(item.resolution[0]):
+                                index = row * item.resolution[0] + column
+                                if column + 1 < item.resolution[0]:
+                                    draw_line(
+                                        image, pixel(positions[index]), pixel(positions[index + 1]), (210, 110, 80)
+                                    )
+                                if row + 1 < item.resolution[1]:
+                                    draw_line(
+                                        image,
+                                        pixel(positions[index]),
+                                        pixel(positions[index + item.resolution[0]]),
+                                        (210, 110, 80),
+                                    )
+                        offset += count
                 for key in state.files:
                     if key.endswith("_particles"):
                         for position in state[key]:
@@ -770,11 +1002,9 @@ class SceneExecutorLocal:
             path.write_bytes(f"P6\n{width} {height}\n255\n".encode() + image.tobytes())
 
     @staticmethod
-    def _render_cache_frames_gl(scene: Scene, frame_paths: list[Path], output_dir: Path) -> bool:
-        """Replay cache through public ViewerFluidGL on CUDA when available."""
+    def _render_cache_frames_gl(scene: Scene, frame_paths: list[Path], output_dir: Path) -> dict[str, Any]:
+        """Replay cache through the hardware OpenGL viewer."""
         device = wp.get_device()
-        if not device.is_cuda:
-            return False
         viewer = None
         try:
             from newton.viewer import (  # noqa: PLC0415
@@ -786,7 +1016,28 @@ class SceneExecutorLocal:
             compiled = SceneCompilerNewton().compile(scene)
             width, height = scene.render.resolution
             viewer = ViewerFluidGL(width=width, height=height, headless=True)
+            from pyglet import gl
+
+            def gl_string(name) -> str:
+                value = gl.glGetString(name)
+                return value.decode("utf-8", errors="replace") if value else "unknown"
+
+            gl_vendor = gl_string(gl.GL_VENDOR)
+            gl_renderer = gl_string(gl.GL_RENDERER)
+            gl_version = gl_string(gl.GL_VERSION)
+            software_markers = ("llvmpipe", "softpipe", "software rasterizer", "osmesa")
+            if any(marker in gl_renderer.lower() for marker in software_markers):
+                raise RuntimeError(f"Hardware OpenGL is required; detected software renderer: {gl_renderer}")
             viewer.set_model(compiled.model)
+            camera = scene.render.camera
+            if camera.position is not None and camera.target is not None:
+                position = np.asarray(camera.position, dtype=float)
+                direction = np.asarray(camera.target, dtype=float) - position
+                direction /= max(np.linalg.norm(direction), 1.0e-8)
+                yaw = math.degrees(math.atan2(direction[1], direction[0]))
+                pitch = math.degrees(math.asin(np.clip(direction[2], -1.0, 1.0)))
+                viewer.set_camera(wp.vec3(*position), pitch, yaw)
+                viewer.camera.fov = camera.field_of_view
             smoke_renderers = {}
             liquid_renderers = {}
             for object_id, item in scene.objects.items():
@@ -841,14 +1092,25 @@ class SceneExecutorLocal:
                     viewer.end_frame()
                     image = viewer.get_frame().numpy()
                     if not np.any(image):
-                        return False
+                        raise RuntimeError(f"Framebuffer readback returned an empty image at frame {render_index}")
                     if any(not renderer.available for renderer in liquid_renderers.values()):
-                        return False
+                        raise RuntimeError(f"Screen-space fluid renderer failed at frame {render_index}")
                     path = output_dir / f"frame-{render_index:06d}.ppm"
                     path.write_bytes(f"P6\n{width} {height}\n255\n".encode() + image.tobytes())
-            return True
-        except Exception:
-            return False
+            return {
+                "simulation_device": str(device),
+                "render_backend": "opengl_hardware",
+                "render_data_path": "cuda_interop" if device.is_cuda else "host_staging",
+                "gl_vendor": gl_vendor,
+                "gl_renderer": gl_renderer,
+                "gl_version": gl_version,
+                "render_equivalent": True,
+            }
+        except Exception as exc:
+            raise RuntimeError(
+                f"Hardware OpenGL rendering unavailable ({type(exc).__name__}: {exc}). "
+                "Pass through a graphics device and matching GPU driver; software rendering is not supported."
+            ) from exc
         finally:
             if viewer is not None:
                 with suppress(Exception):
@@ -1005,11 +1267,13 @@ class SceneExecutorLocal:
             "schema_version": 1,
             "scene_hash": scene_hash,
             "complete": True,
+            "physics_valid": simulation["metrics"]["physics"]["valid"],
             "frames": frame_count,
             "fps": scene.settings.fps,
             "frame_pattern": "frames/%06d.npz",
             "contacts": contacts_path.name,
             "metrics": "../metrics.json",
+            "simulation_device": str(device),
         }
         cache_manifest_path.write_text(json.dumps(cache_manifest, indent=2) + "\n", encoding="utf-8")
 
@@ -1019,37 +1283,66 @@ class SceneExecutorLocal:
         update("render", frame_count)
         render_started = time.perf_counter()
         rendered = self._encode_video(scene, animation_path, cache_dir)
+        for key in (
+            "simulation_device",
+            "render_backend",
+            "render_data_path",
+            "gl_vendor",
+            "gl_renderer",
+            "gl_version",
+            "render_equivalent",
+        ):
+            if key in rendered:
+                metrics[key] = rendered[key]
         metrics["timings"]["render_seconds"] = time.perf_counter() - render_started
         metrics_path.write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
-        if rendered.get("diagnostics"):
+        render_diagnostics = rendered.get("diagnostics", [])
+        if render_diagnostics:
             with diagnostics_path.open("a", encoding="utf-8") as stream:
-                for diagnostic in rendered["diagnostics"]:
+                for diagnostic in render_diagnostics:
                     stream.write(json.dumps(diagnostic, sort_keys=True) + "\n")
-        status = rendered["status"]
-        update("completed" if status == "completed" else "render_failed", frame_count, status)
+        render_status = rendered["status"]
+        physics_valid = simulation["metrics"]["physics"]["valid"]
+        status = render_status if render_status != "completed" else ("completed" if physics_valid else "physics_failed")
+        stage = (
+            "render_failed"
+            if render_status != "completed"
+            else ("completed" if physics_valid else "physics_validation")
+        )
+        update(stage, frame_count, status)
         return {
             "status": status,
-            "stage": "completed" if status == "completed" else "render_failed",
+            "stage": stage,
             "scene": scene.name,
             "scene_hash": scene_hash,
             "frames": frame_count,
             "artifacts": artifacts,
             "metrics": metrics,
-            "diagnostics": rendered.get("diagnostics", []),
+            "diagnostics": [*simulation["diagnostics"], *render_diagnostics],
         }
 
     def resume_render(self, scene: Scene, *, output_dir: Path) -> dict[str, Any]:
         """Resume only the render stage of a job with a complete cache."""
         output_dir = output_dir.resolve()
         cache_manifest = output_dir / "cache" / "manifest.json"
-        if not cache_manifest.is_file() or not json.loads(cache_manifest.read_text())["complete"]:
+        cache_metadata = json.loads(cache_manifest.read_text()) if cache_manifest.is_file() else {}
+        if not cache_metadata.get("complete", False):
             raise ValueError("A complete simulation cache is required to resume rendering")
         rendered = self._encode_video(scene, output_dir / "animation.mp4", output_dir / "cache")
+        physics_valid = cache_metadata.get("physics_valid", True)
+        status = (
+            rendered["status"]
+            if rendered["status"] != "completed"
+            else ("completed" if physics_valid else "physics_failed")
+        )
         return {
             **rendered,
+            "status": status,
             "scene": scene.name,
             "output_dir": str(output_dir),
-            "stage": "completed" if rendered["status"] == "completed" else "render_failed",
+            "stage": "render_failed"
+            if rendered["status"] != "completed"
+            else ("completed" if physics_valid else "physics_validation"),
             "artifacts": {
                 "animation": str(output_dir / "animation.mp4"),
                 "scene": str(output_dir / "scene.json"),

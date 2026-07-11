@@ -22,6 +22,15 @@ class TestCanonicalScenes(unittest.TestCase):
         self.assertEqual(len(scenes), 10)
         self.assertTrue(all(validate_scene(scene)["valid"] for scene in scenes.values()))
 
+    def test_all_canonical_scenes_are_physically_valid(self):
+        for name in canonical_scenes():
+            with self.subTest(name=name):
+                result = _result(name)
+                self.assertEqual(result["status"], "completed", result["diagnostics"])
+                self.assertTrue(result["metrics"]["physics"]["valid"])
+                for fluid in result["metrics"]["fluid"].values():
+                    self.assertLess(fluid["peak_divergence"], 100.0)
+
     def test_01_rigid_objects_ground_and_collide(self):
         result = _result("01_rigid_contacts")
         self.assertGreaterEqual(len(result["metrics"]["contact_pairs"]), 1)
@@ -50,6 +59,8 @@ class TestCanonicalScenes(unittest.TestCase):
         center_minimum = min(frame["cloth_q"][84, 2] for frame in result["state_frames"])
         self.assertLess(center_minimum, corners.mean() - 0.15)
         self.assertGreater(result["metrics"]["soft_contacts"], 0)
+        self.assertIn(["ball", "cloth"], result["metrics"]["soft_contact_pairs"])
+        self.assertLess(result["metrics"]["max_soft_penetration"], 0.1)
 
     def test_05_hanging_cloth_descends_and_swings(self):
         frames = _result("05_hanging_cloth")["state_frames"]
@@ -104,6 +115,7 @@ class TestCanonicalScenes(unittest.TestCase):
         self.assertTrue(np.all(np.abs(block_heights - surface) < 0.35))
         self.assertGreater(float(np.max(np.linalg.norm(rotations, axis=2))), 0.05)
         self.assertIn(["block_0", "block_1"], result["metrics"]["contact_pairs"])
+        self.assertGreater(result["metrics"]["first_active_contact_pair_times"]["block_0|block_1"], 0.0)
 
 
 if __name__ == "__main__":

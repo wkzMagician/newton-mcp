@@ -426,8 +426,18 @@ class CameraDTO(DTOBase):
 
     position: Vec3 | None = Field(None, description="Camera position [m].")
     target: Vec3 | None = Field(None, description="Look-at target [m].")
+    up: Vec3 = Field((0.0, 0.0, 1.0), description="Preferred image-up direction.")
     field_of_view: float = Field(45.0, gt=0.0, lt=180.0, description="Vertical field of view [deg].")
     auto_frame: bool = True
+
+
+class CameraLookAtDTO(DTOBase):
+    """Fixed look-at camera accepted by :func:`set_camera`."""
+
+    position: Vec3 = Field(description="Camera position [m].")
+    target: Vec3 = Field(description="Look-at target [m].")
+    up: Vec3 = Field((0.0, 0.0, 1.0), description="Preferred image-up direction.")
+    field_of_view: float = Field(45.0, gt=0.0, lt=180.0, description="Vertical field of view [deg].")
 
 
 class LightDTO(DTOBase):
