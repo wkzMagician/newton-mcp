@@ -178,7 +178,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--case", choices=sorted(AGENT_PROMPTS), action="append", dest="cases")
     parser.add_argument("--run-dir", type=Path, help="New directory that will contain this evaluation run")
     parser.add_argument("--model", help="Optional Codex model override")
-    parser.add_argument("--timeout", type=float, default=600.0, help="Timeout per case in seconds")
+    parser.add_argument("--timeout", type=float, default=1200.0, help="Timeout per case in seconds")
     parser.add_argument("--auth-file", type=Path, default=Path.home() / ".codex" / "auth.json")
     parser.add_argument("--no-auth-copy", action="store_true", help="Use OPENAI_API_KEY instead of copying auth.json")
     parser.add_argument("--dry-run", action="store_true", help="Prepare prompts/workspaces without invoking Codex")

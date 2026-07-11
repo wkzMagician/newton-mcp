@@ -94,7 +94,7 @@ When `--run-dir` is omitted, results are written beneath
 `evaluation/results/agent-workflow/<timestamp>/`. Use `--run-dir` only when a
 different explicit destination is needed.
 
-Each experiment has a default timeout of 10 minutes. On timeout, the runner
+Each experiment has a default timeout of 20 minutes. On timeout, the runner
 terminates the complete Codex/MCP process group, records the case as failed,
 and continues with the next experiment. Override the limit in seconds with
 `--timeout`.
