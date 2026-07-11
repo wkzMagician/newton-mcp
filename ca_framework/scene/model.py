@@ -153,12 +153,13 @@ class ObjectFluid(ObjectBase):
 
 @dataclass(slots=True)
 class ObjectContainer(ObjectBase):
-    """Open-top compound container generated from a floor and four walls."""
+    """Compound container generated from a floor, four walls, and optional lid."""
 
     kind: Literal["container"] = "container"
     inner_size: Vec3 = (1.0, 1.0, 1.0)
     wall_thickness: float = 0.05
     transparent_shell: bool = True
+    closed: bool = False
 
 
 SceneObject: TypeAlias = ObjectRigid | ObjectCloth | ObjectFluid | ObjectContainer

@@ -541,6 +541,8 @@ if __name__ == "__main__":
             {"kind": "box", "size": (x, t, z), "position": (0.0, -(y + t) / 2, z / 2)},
             {"kind": "box", "size": (x, t, z), "position": (0.0, (y + t) / 2, z / 2)},
         ]
+        if container.closed:
+            raw.append({"kind": "box", "size": (x + 2 * t, y + 2 * t, t), "position": (0.0, 0.0, z + t / 2)})
         return [
             {
                 **shape,

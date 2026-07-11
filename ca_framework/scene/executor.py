@@ -1167,7 +1167,7 @@ class SceneExecutorLocal:
 
     @staticmethod
     def _container_wireframes(scene: Scene, device: Any) -> dict[str, tuple[Any, Any, tuple[float, float, float]]]:
-        """Build colored outer-edge wireframes for transparent open containers."""
+        """Build colored outer-edge wireframes for transparent containers."""
         wireframes = {}
         edge_indices = (
             (0, 1),

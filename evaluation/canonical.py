@@ -45,7 +45,7 @@ def canonical_scenes() -> dict[str, Scene]:
                     "transform": {"position": [0.45, 0.0, 2.2]},
                 },
             },
-            "settings": {"duration": 2.0, "fps": 30, "substeps": 4},
+            "settings": {"duration": 5.0, "fps": 30, "substeps": 4},
             "render": {"camera": {"position": [2.8, -4.2, 2.8], "target": [0.0, 0.0, 1.2]}},
         },
         "02_domino_wave": {
@@ -76,7 +76,7 @@ def canonical_scenes() -> dict[str, Scene]:
                     "point": [0.0, 0.0, 0.35],
                 }
             },
-            "settings": {"duration": 2.0, "fps": 40, "substeps": 8},
+            "settings": {"duration": 5.0, "fps": 40, "substeps": 8},
             "render": {"camera": {"position": [2.8, -4.0, 2.2], "target": [0.35, 0.0, 0.4]}},
         },
         "03_ramp_bounce": {
@@ -107,7 +107,7 @@ def canonical_scenes() -> dict[str, Scene]:
                     "transform": {"position": [1.25, 0.0, 0.65]},
                 },
             },
-            "settings": {"duration": 2.5, "fps": 40, "substeps": 5},
+            "settings": {"duration": 5.0, "fps": 40, "substeps": 5},
             "render": {"camera": {"position": [2.8, -3.8, 2.3], "target": [0.1, 0.0, 0.75]}},
         },
         "04_cloth_ball": {
@@ -134,7 +134,7 @@ def canonical_scenes() -> dict[str, Scene]:
                     "transform": {"position": [0.0, 0.0, 2.2]},
                 },
             },
-            "settings": {"duration": 1.8, "fps": 30, "substeps": 12},
+            "settings": {"duration": 5.0, "fps": 30, "substeps": 12},
             "render": {"camera": {"position": [2.5, -3.5, 2.5], "target": [0.0, 0.0, 1.0]}},
         },
         "05_hanging_cloth": {
@@ -163,7 +163,7 @@ def canonical_scenes() -> dict[str, Scene]:
                     "end_time": 0.15,
                 }
             },
-            "settings": {"duration": 3.0, "fps": 30, "substeps": 8},
+            "settings": {"duration": 5.0, "fps": 30, "substeps": 8},
             "render": {
                 "ground": False,
                 "camera": {
@@ -202,7 +202,7 @@ def canonical_scenes() -> dict[str, Scene]:
                     "transform": {"position": [0.55, 0.0, 0.55]},
                 },
             },
-            "settings": {"duration": 2.0, "fps": 30, "substeps": 5},
+            "settings": {"duration": 5.0, "fps": 30, "substeps": 5},
             "render": {"camera": {"position": [2.8, -4.0, 2.5], "target": [0.0, 0.0, 0.8]}},
         },
         "07_smoke_partitions": {
@@ -226,24 +226,16 @@ def canonical_scenes() -> dict[str, Scene]:
                         }
                     ],
                 },
-                "wall_a": {
-                    "id": "wall_a",
-                    "kind": "rigid",
+                "chamber": {
+                    "id": "chamber",
+                    "kind": "container",
                     "motion": "static",
-                    "shape": "box",
-                    "size": [0.08, 1.0, 1.2],
-                    "transform": {"position": [-0.25, 0.0, 0.6]},
-                },
-                "wall_b": {
-                    "id": "wall_b",
-                    "kind": "rigid",
-                    "motion": "static",
-                    "shape": "box",
-                    "size": [0.08, 1.0, 1.2],
-                    "transform": {"position": [0.35, 0.0, 1.4]},
+                    "inner_size": [2.0, 1.0, 2.0],
+                    "wall_thickness": 0.05,
+                    "closed": True,
                 },
             },
-            "settings": {"duration": 2.5, "fps": 20, "substeps": 1},
+            "settings": {"duration": 5.0, "fps": 20, "substeps": 1},
             "render": {
                 "ground": False,
                 "camera": {
@@ -291,7 +283,7 @@ def canonical_scenes() -> dict[str, Scene]:
                     ],
                 },
             },
-            "settings": {"duration": 3.0, "fps": 20, "substeps": 2, "max_particles": 10000},
+            "settings": {"duration": 5.0, "fps": 20, "substeps": 2, "max_particles": 10000},
             "render": {
                 "ground": False,
                 "camera": {
@@ -329,7 +321,7 @@ def canonical_scenes() -> dict[str, Scene]:
                     "physical_material": {"density": 7800.0},
                 },
             },
-            "settings": {"duration": 1.5, "fps": 25, "substeps": 2, "max_particles": 12000},
+            "settings": {"duration": 5.0, "fps": 25, "substeps": 2, "max_particles": 12000},
             "render": {
                 "ground": False,
                 "camera": {
@@ -370,7 +362,7 @@ def canonical_scenes() -> dict[str, Scene]:
                     for index in range(3)
                 },
             },
-            "settings": {"duration": 2.0, "fps": 20, "substeps": 2, "max_particles": 15000},
+            "settings": {"duration": 5.0, "fps": 20, "substeps": 2, "max_particles": 15000},
             "render": {
                 "ground": False,
                 "camera": {
