@@ -105,9 +105,14 @@ class ObjectClothDTO(ObjectBaseDTO):
     thickness: float = Field(0.01, gt=0.0, description="Collision thickness [m].")
     surface_density: float = Field(0.2, gt=0.0, description="Surface mass density [kg/m^2].")
     stretch_stiffness: float = Field(1000.0, ge=0.0, description="Stretch stiffness [N/m].")
+    area_stiffness: float | None = Field(None, ge=0.0, description="Area-preservation stiffness [N/m].")
     bend_stiffness: float = Field(1.0, ge=0.0, description="Bending stiffness [N m].")
     damping: float = Field(0.01, ge=0.0, description="Damping coefficient.")
+    stretch_damping: float | None = Field(None, ge=0.0, description="Stretch damping coefficient.")
+    bend_damping: float | None = Field(None, ge=0.0, description="Bend damping coefficient.")
     air_drag: float = Field(0.0, ge=0.0, description="Air drag coefficient.")
+    collision_radius: float | None = Field(None, gt=0.0, description="Particle collision radius [m].")
+    max_stretch_ratio: float = Field(1.2, ge=1.0, description="Maximum edge stretch relative to rest length.")
     self_collision: bool = False
     pinned: list[VertexSelectorDTO] = Field(default_factory=list)
 
@@ -136,6 +141,7 @@ class ObjectContainerDTO(ObjectBaseDTO):
     inner_size: Vec3 = Field((1.0, 1.0, 1.0), description="Interior dimensions [m].")
     wall_thickness: float = Field(0.05, gt=0.0, description="Wall thickness [m].")
     transparent_shell: bool = True
+    closed: bool = False
 
 
 ObjectSpecDTO = Annotated[

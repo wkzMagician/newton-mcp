@@ -128,6 +128,7 @@ class TestMcpSchema(unittest.TestCase):
                                 "phase": "liquid",
                                 "grid_resolution": [8, 9, 10],
                                 "emitters": [{"size": [0.1, 0.2, 0.3]}],
+                                "transform": {"position": [1.0, 2.0, 3.0]},
                             },
                         },
                     )
@@ -136,7 +137,11 @@ class TestMcpSchema(unittest.TestCase):
                         {
                             "scene_name": "typed",
                             "item_id": "water",
-                            "patch": {"kind": "fluid", "flip_ratio": 0.8},
+                            "patch": {
+                                "kind": "fluid",
+                                "flip_ratio": 0.8,
+                                "transform": {"rotation": [0.0, 0.0, 0.0, 1.0]},
+                            },
                         },
                     )
                     return updated
@@ -145,6 +150,7 @@ class TestMcpSchema(unittest.TestCase):
         self.assertEqual(updated["flip_ratio"], 0.8)
         self.assertEqual(updated["grid_resolution"], [8, 9, 10])
         self.assertEqual(updated["emitters"][0]["size"], [0.1, 0.2, 0.3])
+        self.assertEqual(updated["transform"]["position"], [1.0, 2.0, 3.0])
 
     def test_object_dto_fields_track_runtime_dataclasses(self):
         pairs = (

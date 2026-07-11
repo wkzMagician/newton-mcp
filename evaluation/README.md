@@ -67,3 +67,46 @@ For strict multi-run evaluation, generate a separate Codex home/MCP
 configuration per run so `CA_SCENE_WORKSPACE` cannot leak scenes between runs.
 Only install the generic skills from `knowledge/skills`; do not create a skill
 that imports or describes anything in this directory.
+
+## Run ten black-box agent experiments
+
+The ten natural-language tasks in `evaluation/agent_prompts.py` describe the
+observable outcomes of the canonical scenes without exposing their Scene IR,
+numeric acceptance assertions, or reference artifacts. The runner starts a
+fresh `codex exec --ephemeral` process for every task and gives it independent
+Codex configuration, scene storage, workspace, and output directories.
+
+First prepare all inputs without invoking Codex:
+
+```bash
+uv run -m evaluation.run_agent_experiments \
+  --dry-run
+```
+
+Run all ten experiments serially:
+
+```bash
+export WARP_CACHE_ROOT=/tmp/newton-warp-cache-$$
+uv run -m evaluation.run_agent_experiments
+```
+
+When `--run-dir` is omitted, results are written beneath
+`evaluation/results/agent-workflow/<timestamp>/`. Use `--run-dir` only when a
+different explicit destination is needed.
+
+By default the runner copies only `~/.codex/auth.json` into each temporary
+Codex home. It does not copy user configuration, sessions, or memories. To use
+`OPENAI_API_KEY` instead, pass `--no-auth-copy`. Run one task with `--case`:
+
+```bash
+uv run -m evaluation.run_agent_experiments \
+  --case 02_domino_wave \
+  --run-dir /tmp/ca-agent-domino \
+  --no-auth-copy
+```
+
+Each case retains its exact prompt, Codex JSONL event log, final message,
+agent-created scene store, and output bundle. `summary.json` reports the Codex
+exit code, elapsed time, and presence of every required artifact. This is a
+black-box generation test: canonical scenes remain evaluator-only and are not
+copied or mounted into the agent workspace.

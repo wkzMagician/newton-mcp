@@ -185,15 +185,16 @@ class SceneTools:
     def _update_collection_entry(
         self, scene_name: str, collection: str, item_id: str, patch: dict[str, Any]
     ) -> dict[str, Any]:
-        """Apply a validated shallow patch to one typed collection."""
+        """Apply a validated recursive patch to one typed collection."""
         scene = self.store.load(scene_name)
         items = _collection(scene, collection)
         if item_id not in items:
             raise KeyError(f"Unknown {collection} item: {item_id}")
-        merged = item_to_dict(items[item_id]) | patch
+        original = item_to_dict(items[item_id])
+        merged = _merge_patch(deepcopy(original), patch)
         if merged.get("id") != item_id:
             raise ValueError("Item ids cannot be changed")
-        if merged.get("kind") != item_to_dict(items[item_id]).get("kind"):
+        if merged.get("kind") != original.get("kind"):
             raise ValueError("Item kinds cannot be changed")
         parser = {
             "objects": _object_from_dict,
