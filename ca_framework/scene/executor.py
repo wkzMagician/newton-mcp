@@ -1040,8 +1040,7 @@ class SceneExecutorLocal:
             if any(marker in gl_renderer.lower() for marker in software_markers):
                 raise RuntimeError(f"Hardware OpenGL is required; detected software renderer: {gl_renderer}")
             camera = scene.render.camera
-            if camera.position is not None:
-                SceneExecutorLocal._hide_near_container_walls(scene, compiled, np.asarray(camera.position, dtype=float))
+            SceneExecutorLocal._hide_transparent_container_faces(scene, compiled)
             viewer.set_model(compiled.model)
             if camera.position is not None and camera.target is not None:
                 position = np.asarray(camera.position, dtype=float)
@@ -1053,6 +1052,7 @@ class SceneExecutorLocal:
                 viewer.camera.fov = camera.field_of_view
             elif camera.auto_frame:
                 SceneExecutorLocal._set_auto_camera(viewer, scene)
+            container_wireframes = SceneExecutorLocal._container_wireframes(scene, device)
             smoke_renderers = {}
             liquid_renderers = {}
             for object_id, item in scene.objects.items():
@@ -1104,6 +1104,8 @@ class SceneExecutorLocal:
                         renderer.set_particles(particles)
                     viewer.begin_frame(render_index / scene.render.fps)
                     viewer.log_state(compiled.state_0)
+                    for object_id, (starts, ends, color) in container_wireframes.items():
+                        viewer.log_lines(f"/containers/{object_id}", starts, ends, color, width=2.0)
                     viewer.end_frame()
                     image = viewer.get_frame().numpy()
                     if not np.any(image):
@@ -1149,20 +1151,64 @@ class SceneExecutorLocal:
         viewer.camera.fov = scene.render.camera.field_of_view
 
     @staticmethod
-    def _hide_near_container_walls(scene: Scene, compiled: Any, camera_position: np.ndarray) -> None:
-        """Hide the camera-facing wall in the render-only container model."""
+    def _hide_transparent_container_faces(scene: Scene, compiled: Any) -> None:
+        """Hide solid faces of transparent containers in the render-only model."""
         scales = compiled.model.shape_scale.numpy()
         changed = False
         for item in scene.objects.values():
             if not isinstance(item, ObjectContainer) or not item.transparent_shell:
                 continue
-            colliders = compiled.container_colliders[item.id]
             indices = compiled.shape_indices[item.id]
-            for wall_slot in range(1, len(colliders)):
-                scales[indices[wall_slot]] = 0.0
+            for shape_index in indices:
+                scales[shape_index] = 0.0
             changed = True
         if changed:
             SceneExecutorLocal._copy_array(compiled.model.shape_scale, scales)
+
+    @staticmethod
+    def _container_wireframes(scene: Scene, device: Any) -> dict[str, tuple[Any, Any, tuple[float, float, float]]]:
+        """Build colored outer-edge wireframes for transparent open containers."""
+        wireframes = {}
+        edge_indices = (
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 0),
+            (4, 5),
+            (5, 6),
+            (6, 7),
+            (7, 4),
+            (0, 4),
+            (1, 5),
+            (2, 6),
+            (3, 7),
+        )
+        for item in scene.objects.values():
+            if not isinstance(item, ObjectContainer) or not item.transparent_shell:
+                continue
+            x, y, z = np.asarray(item.inner_size, dtype=float) * np.asarray(item.transform.scale, dtype=float)
+            corners = np.asarray(
+                [
+                    (-x / 2, -y / 2, 0.0),
+                    (x / 2, -y / 2, 0.0),
+                    (x / 2, y / 2, 0.0),
+                    (-x / 2, y / 2, 0.0),
+                    (-x / 2, -y / 2, z),
+                    (x / 2, -y / 2, z),
+                    (x / 2, y / 2, z),
+                    (-x / 2, y / 2, z),
+                ],
+                dtype=np.float32,
+            )
+            qx, qy, qz, qw = item.transform.rotation
+            quaternion = np.asarray((qx, qy, qz), dtype=np.float32)
+            corners += 2.0 * (np.cross(quaternion, np.cross(quaternion, corners) + qw * corners))
+            corners += np.asarray(item.transform.position, dtype=np.float32)
+            starts = wp.array(corners[[start for start, _ in edge_indices]], dtype=wp.vec3, device=device)
+            ends = wp.array(corners[[end for _, end in edge_indices]], dtype=wp.vec3, device=device)
+            color = tuple(float(value) for value in item.visual_material.color[:3])
+            wireframes[item.id] = (starts, ends, color)
+        return wireframes
 
     def run(
         self,
