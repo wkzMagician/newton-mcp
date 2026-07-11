@@ -94,6 +94,11 @@ When `--run-dir` is omitted, results are written beneath
 `evaluation/results/agent-workflow/<timestamp>/`. Use `--run-dir` only when a
 different explicit destination is needed.
 
+Each experiment has a default timeout of 10 minutes. On timeout, the runner
+terminates the complete Codex/MCP process group, records the case as failed,
+and continues with the next experiment. Override the limit in seconds with
+`--timeout`.
+
 By default the runner copies only `~/.codex/auth.json` into each temporary
 Codex home. It does not copy user configuration, sessions, or memories. To use
 `OPENAI_API_KEY` instead, pass `--no-auth-copy`. Run one task with `--case`:
