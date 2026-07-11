@@ -136,8 +136,15 @@ class TestCanonicalScenes(unittest.TestCase):
         surface = frames[-1]["water_particles"][:, 2].max()
         block_heights = np.asarray([result["trajectories"][f"block_{index}"][-1][2] for index in range(3)])
         rotations = np.asarray([frame["body_q"][:, 3:6] for frame in frames])
+        angular_speeds = np.asarray([np.linalg.norm(frame["body_qd"][:, 3:], axis=1) for frame in frames])
         self.assertTrue(np.all(np.abs(block_heights - surface) < 0.35))
         self.assertGreater(float(np.max(np.linalg.norm(rotations, axis=2))), 0.05)
+        self.assertLess(float(angular_speeds.max()), 5.0)
+        midpoint = len(angular_speeds) // 2
+        self.assertLess(
+            float(np.sqrt(np.mean(angular_speeds[midpoint:] ** 2))),
+            float(np.sqrt(np.mean(angular_speeds[:midpoint] ** 2))),
+        )
         self.assertIn(["block_0", "block_1"], result["metrics"]["contact_pairs"])
         self.assertGreater(result["metrics"]["first_active_contact_pair_times"]["block_0|block_1"], 0.0)
 

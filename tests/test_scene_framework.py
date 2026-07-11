@@ -16,7 +16,7 @@ from unittest.mock import patch
 import numpy as np
 
 from ca_framework.mcp import SceneTools
-from ca_framework.scene import Scene, SceneExecutorLocal, SceneStore, validate_scene
+from ca_framework.scene import Scene, SceneCompilerNewton, SceneExecutorLocal, SceneStore, validate_scene
 from ca_framework.scene.executor import _decode_gl_string, _physics_validation
 from newton.solvers import SolverBase, SolverExercise5Fluid, SolverFluidAPIC, SolverFluidSmoke, SolverSemiImplicit
 from newton.viewer import ViewerFluidGL
@@ -475,8 +475,53 @@ class TestSceneFramework(unittest.TestCase):
         )
         result = SceneExecutorLocal().simulate(scene)
         impulse = result["metrics"]["fluid"]["water"]["rigid_linear_impulse"]["0"]
-        self.assertGreater(impulse[2], 0.0)
+        self.assertGreater(np.linalg.norm(impulse), 0.0)
         self.assertTrue(all(math.isfinite(value) for value in impulse))
+
+    def test_apic_uniform_interface_pressure_has_no_net_force_or_torque(self):
+        scene = Scene.from_dict(
+            {
+                "name": "symmetric-liquid-coupling",
+                "schema_version": 2,
+                "objects": {
+                    "block": {
+                        "id": "block",
+                        "kind": "rigid",
+                        "shape": "box",
+                        "size": [0.2, 0.3, 0.25],
+                        "transform": {"rotation": [0.0, 0.0, 0.3826834, 0.9238795]},
+                    },
+                    "water": {
+                        "id": "water",
+                        "kind": "fluid",
+                        "phase": "liquid",
+                        "size": [0.8, 0.8, 0.8],
+                        "grid_resolution": [12, 12, 12],
+                        "particle_spacing": 0.15,
+                    },
+                },
+                "settings": {"max_particles": 1000},
+                "render": {"ground": False},
+            }
+        )
+        compiled = SceneCompilerNewton().compile(scene)
+        fluid = compiled.fluid_solvers["water"]
+        fluid._build_solid_mask(compiled.state_0)
+        fluid.fluid[:] = ~fluid.solid
+        fluid.pressure.fill(100.0)
+
+        fluid._couple_rigid_bodies(compiled.state_0, 0.01)
+
+        self.assertGreater(np.count_nonzero(fluid.solid_body == 0), 0)
+        np.testing.assert_allclose(fluid.rigid_linear_impulse[0], 0.0, atol=1.0e-7)
+        np.testing.assert_allclose(fluid.rigid_angular_impulse[0], 0.0, atol=1.0e-7)
+
+        z_centers = fluid.domain_min[2] + (np.arange(fluid.grid_resolution[2]) + 0.5) * fluid.cell_size[2]
+        fluid.pressure[:] = fluid.density * 9.81 * (fluid.domain_max[2] - z_centers)[None, None, :]
+        fluid._couple_rigid_bodies(compiled.state_0, 0.01)
+
+        self.assertGreater(fluid.rigid_linear_impulse[0][2], 0.0)
+        np.testing.assert_allclose(fluid.rigid_linear_impulse[0][:2], 0.0, atol=1.0e-7)
 
     def test_cancellation_leaves_resumable_incomplete_cache(self):
         scene = Scene.from_dict(

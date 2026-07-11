@@ -317,6 +317,7 @@ class SolverFluidAPIC(SolverBase):
         self.divergence = np.zeros(shape, dtype=np.float32)
         self.fluid = np.zeros(shape, dtype=bool)
         self.solid = np.zeros(shape, dtype=bool)
+        self.solid_body = np.full(shape, -1, dtype=np.int32)
         self.solid_velocity = np.zeros((*shape, 3), dtype=np.float32)
         self.emitters: list[SolverFluidAPIC.Emitter] = []
         self.boundaries: list[SolverFluidAPIC.Boundary] = []
@@ -446,6 +447,7 @@ class SolverFluidAPIC(SolverBase):
 
     def _build_solid_mask(self, state_in) -> None:
         self.solid.fill(False)
+        self.solid_body.fill(-1)
         self.solid_velocity.fill(0.0)
         body_q = state_in.body_q.numpy() if state_in is not None and state_in.body_q is not None else None
         body_qd = state_in.body_qd.numpy() if state_in is not None and state_in.body_qd is not None else None
@@ -473,6 +475,7 @@ class SolverFluidAPIC(SolverBase):
             mask = np.all(np.abs(local_coordinates) <= half_extent + self.cell_size * 0.5, axis=-1)
             self.solid[mask] = True
             if boundary.body is not None and body_qd is not None:
+                self.solid_body[mask] = boundary.body
                 linear_velocity = body_qd[boundary.body, :3]
                 angular_velocity = body_qd[boundary.body, 3:]
                 velocity = linear_velocity + np.cross(angular_velocity, cell_centers - body_position)
@@ -489,6 +492,20 @@ class SolverFluidAPIC(SolverBase):
     def _quat_rotate_inverse(quaternion: np.ndarray, vectors: np.ndarray) -> np.ndarray:
         inverse = np.asarray([-quaternion[0], -quaternion[1], -quaternion[2], quaternion[3]])
         return SolverFluidAPIC._quat_rotate(inverse, vectors)
+
+    @staticmethod
+    def _shifted(values: np.ndarray, axis: int, direction: int, fill: float | bool | int) -> np.ndarray:
+        result = np.full_like(values, fill)
+        source = [slice(None)] * 3
+        destination = [slice(None)] * 3
+        if direction < 0:
+            source[axis] = slice(0, -1)
+            destination[axis] = slice(1, None)
+        else:
+            source[axis] = slice(1, None)
+            destination[axis] = slice(0, -1)
+        result[tuple(destination)] = values[tuple(source)]
+        return result
 
     def _particles_to_grid(self) -> None:
         self.grid_mass.fill(0.0)
@@ -620,83 +637,65 @@ class SolverFluidAPIC(SolverBase):
         self.rigid_angular_impulse.clear()
         if state_out is None or state_out.body_qd is None:
             return
+        transforms = state_out.body_q.numpy()
         velocities = state_out.body_qd.numpy()
         masses = self.model.body_mass.numpy()
-        cell_area = float(np.mean(self.cell_size) ** 2)
-        for boundary in self.boundaries:
-            if boundary.body is None or masses[boundary.body] <= 0.0:
+        inertias = self.model.body_inertia.numpy()
+        cell_centers = np.stack(
+            np.meshgrid(
+                *(
+                    self.domain_min[axis] + (np.arange(self.grid_resolution[axis]) + 0.5) * self.cell_size[axis]
+                    for axis in range(3)
+                ),
+                indexing="ij",
+            ),
+            axis=-1,
+        )
+        dynamic_bodies = np.unique(self.solid_body[self.solid_body >= 0])
+        for body_value in dynamic_bodies:
+            body = int(body_value)
+            if masses[body] <= 0.0:
                 continue
-            transform = state_out.body_q.numpy()[boundary.body]
-            position = transform[:3] + self._quat_rotate(
-                transform[3:], np.asarray(boundary.local_position or (0.0, 0.0, 0.0))
-            )
-            half_extent = np.asarray(boundary.half_extent)
-            low = np.floor((position - half_extent - self.domain_min) / self.cell_size).astype(int)
-            high = np.floor((position + half_extent - self.domain_min) / self.cell_size).astype(int)
-            low = np.clip(low, 0, np.asarray(self.grid_resolution) - 1)
-            high = np.clip(high, 0, np.asarray(self.grid_resolution) - 1)
+            position = transforms[body, :3]
             force = np.zeros(3, dtype=np.float64)
             torque = np.zeros(3, dtype=np.float64)
             for axis in range(3):
-                negative = [slice(low[i], high[i] + 1) for i in range(3)]
-                positive = list(negative)
-                negative[axis] = max(low[axis] - 1, 0)
-                positive[axis] = min(high[axis] + 1, self.grid_resolution[axis] - 1)
-                for face, sign in ((negative, 1.0), (positive, -1.0)):
-                    face_pressure = self.pressure[tuple(face)]
-                    scalar_forces = face_pressure.reshape(-1) * cell_area
-                    face_force = np.zeros((scalar_forces.size, 3), dtype=np.float64)
-                    face_force[:, axis] = sign * scalar_forces
-                    ranges = [
-                        np.arange(low[index], high[index] + 1)
-                        if isinstance(face[index], slice)
-                        else np.asarray([face[index]])
-                        for index in range(3)
-                    ]
-                    indices = np.stack(np.meshgrid(*ranges, indexing="ij"), axis=-1).reshape(-1, 3)
-                    face_positions = self.domain_min + (indices + 0.5) * self.cell_size
+                cell_area = float(np.prod(np.delete(self.cell_size, axis)))
+                for direction in (-1, 1):
+                    neighbour_body = self._shifted(self.solid_body, axis, direction, -1)
+                    interface = self.fluid & (neighbour_body == body)
+                    if not np.any(interface):
+                        continue
+                    interface_pressure = np.maximum(self.pressure[interface], 0.0)
+                    scalar_forces = interface_pressure.astype(np.float64) * cell_area
+                    face_force = np.zeros((len(scalar_forces), 3), dtype=np.float64)
+                    face_force[:, axis] = direction * scalar_forces
+                    face_positions = cell_centers[interface].astype(np.float64)
+                    face_positions[:, axis] += direction * self.cell_size[axis] * 0.5
                     force += face_force.sum(axis=0)
                     torque += np.cross(face_positions - position, face_force).sum(axis=0)
-            fluid_cells = np.argwhere(self.fluid)
-            if fluid_cells.size:
-                surface_z = self.domain_min[2] + (float(fluid_cells[:, 2].max()) + 1.0) * self.cell_size[2]
-                submerged_height = np.clip(
-                    surface_z - (position[2] - half_extent[2]),
-                    0.0,
-                    2.0 * half_extent[2],
-                )
-                displaced_volume = 4.0 * half_extent[0] * half_extent[1] * submerged_height
-                buoyancy = self.density * abs(float(self.model.gravity.numpy()[0, 2])) * displaced_volume
-                force[2] = max(force[2], buoyancy)
-                force -= masses[boundary.body] * 4.0 * velocities[boundary.body, :3]
-                lateral_limit = max(buoyancy * 0.02, 1.0e-6)
-                force[:2] = np.clip(force[:2], -lateral_limit, lateral_limit)
+            rotated_basis = self._quat_rotate(transforms[body, 3:], np.eye(3))
+            world_inertia = rotated_basis.T @ inertias[body] @ rotated_basis
+            force -= masses[body] * 4.0 * velocities[body, :3]
+            torque -= world_inertia @ (4.0 * velocities[body, 3:])
             impulse = force * dt
             angular_impulse = torque * dt
-            volume = 8.0 * float(np.prod(half_extent))
-            max_impulse = self.density * volume * abs(float(self.model.gravity.numpy()[0, 2])) * dt * 2.0
+            gravity = abs(float(self.model.gravity.numpy()[0, 2]))
+            max_impulse = masses[body] * 2.0 * gravity * dt
             impulse_norm = float(np.linalg.norm(impulse))
             if impulse_norm > max_impulse > 0.0:
                 impulse *= max_impulse / impulse_norm
-            max_angular_impulse = max_impulse * float(np.max(half_extent)) * 0.1
-            angular_norm = float(np.linalg.norm(angular_impulse))
-            if angular_norm > max_angular_impulse > 0.0:
-                angular_impulse *= max_angular_impulse / angular_norm
-            velocities[boundary.body, :3] += impulse / masses[boundary.body]
-            inertia = (
-                masses[boundary.body]
-                / 3.0
-                * np.asarray(
-                    [
-                        half_extent[1] ** 2 + half_extent[2] ** 2,
-                        half_extent[0] ** 2 + half_extent[2] ** 2,
-                        half_extent[0] ** 2 + half_extent[1] ** 2,
-                    ]
-                )
-            )
-            velocities[boundary.body, 3:] += angular_impulse / np.maximum(inertia, 1.0e-8)
-            self.rigid_linear_impulse[boundary.body] = impulse.astype(np.float32)
-            self.rigid_angular_impulse[boundary.body] = angular_impulse.astype(np.float32)
+            angular_velocity_delta = np.linalg.solve(world_inertia, angular_impulse)
+            max_angular_velocity_delta = 20.0 * dt
+            angular_delta_norm = float(np.linalg.norm(angular_velocity_delta))
+            if angular_delta_norm > max_angular_velocity_delta:
+                scale = max_angular_velocity_delta / angular_delta_norm
+                angular_impulse *= scale
+                angular_velocity_delta *= scale
+            velocities[body, :3] += impulse / masses[body]
+            velocities[body, 3:] += angular_velocity_delta
+            self.rigid_linear_impulse[body] = impulse.astype(np.float32)
+            self.rigid_angular_impulse[body] = angular_impulse.astype(np.float32)
         wp.copy(
             state_out.body_qd,
             wp.array(velocities, dtype=state_out.body_qd.dtype, device=state_out.body_qd.device),
