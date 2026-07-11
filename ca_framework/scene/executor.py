@@ -56,6 +56,21 @@ _PHYSICS_FAILURE_CODES = frozenset(
 )
 
 
+def _preview_recommended_actions(result: dict[str, Any]) -> list[str]:
+    """Map generic preview diagnostics to bounded repair advice."""
+    actions: list[str] = []
+    codes = {item.get("code") for item in result.get("diagnostics", [])}
+    if "energy_explosion" in codes:
+        actions.append("Reduce forcing or stiffness, then increase only substeps or damping.")
+    if "cloth_deformation_failure" in codes:
+        actions.append("Reduce impact energy, then adjust cloth damping or stiffness without increasing resolution.")
+    if "pressure_nonconvergence" in codes:
+        actions.append("Increase boundary clearance or particle spacing before changing solver iterations.")
+    if result.get("budget_warnings"):
+        actions.append("Reduce one resource dimension before the next preview.")
+    return actions or ["Proceed only if the preview physics and requested interactions are valid."]
+
+
 def _decode_gl_string(value: Any) -> str:
     """Decode a string returned by an OpenGL implementation."""
     if not value:
@@ -1008,23 +1023,73 @@ class SceneExecutorLocal:
 
     def preview(self, scene: Scene, *, frames: int | None = None) -> dict[str, Any]:
         """Run a short, reduced-cost simulation and return sampled keyframes."""
+        started = time.monotonic()
         preview_scene = Scene.from_dict(scene.to_dict())
         preview_scene.settings.duration = min(1.0, scene.settings.duration)
+        preview_scene.settings.fps = min(30, scene.settings.fps)
+        preview_scene.settings.substeps = min(12, scene.settings.substeps)
+        preview_scene.settings.solver_iterations = min(10, scene.settings.solver_iterations)
         preview_scene.settings.max_particles = min(50_000, scene.settings.max_particles)
         preview_scene.render.resolution = (640, 360)
+        original_sizes: dict[str, Any] = {}
+        effective_sizes: dict[str, Any] = {}
+        indexed_cloth_ids = {
+            constraint.object_id
+            for constraint in preview_scene.constraints.values()
+            if getattr(constraint, "selector", None) is not None
+            and getattr(constraint.selector, "kind", None) == "indices"
+        }
         for item in preview_scene.objects.values():
+            if isinstance(item, ObjectCloth):
+                original_sizes[item.id] = {"resolution": list(item.resolution), "vertices": math.prod(item.resolution)}
+                has_indices = item.id in indexed_cloth_ids or any(
+                    selector.kind == "indices" for selector in item.pinned
+                )
+                if not has_indices:
+                    item.resolution = tuple(min(axis, 24) for axis in item.resolution)
+                effective_sizes[item.id] = {"resolution": list(item.resolution), "vertices": math.prod(item.resolution)}
+                continue
             if not isinstance(item, ObjectFluid):
                 continue
+            original_sizes[item.id] = {
+                "grid_resolution": list(item.grid_resolution),
+                "particle_spacing": item.particle_spacing,
+            }
             limit = 32 if item.phase == "smoke" else 24
             item.grid_resolution = tuple(min(axis, limit) for axis in item.grid_resolution)
             if item.phase == "liquid":
                 estimated = math.prod(max(1, int(size / item.particle_spacing)) for size in item.size)
                 if estimated > preview_scene.settings.max_particles:
                     item.particle_spacing *= (estimated / preview_scene.settings.max_particles) ** (1.0 / 3.0)
-        result = self.simulate(preview_scene, frames=frames, preview=True)
+            effective_sizes[item.id] = {
+                "grid_resolution": list(item.grid_resolution),
+                "particle_spacing": item.particle_spacing,
+            }
+        preview_report = validate_scene(preview_scene)
+        hard_errors = [item for item in preview_report["diagnostics"] if item["severity"] == "error"]
+        if hard_errors:
+            return {
+                "status": "preview_budget_exceeded",
+                "preview": True,
+                "diagnostics": hard_errors,
+                "budget_warnings": preview_report["diagnostics"],
+                "original_sizes": original_sizes,
+                "effective_sizes": effective_sizes,
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+                "recommended_actions": [
+                    "Reduce one resource dimension while preserving explicit cloth vertex indices."
+                ],
+            }
+        max_frames = max(1, round(preview_scene.settings.duration * preview_scene.settings.fps))
+        effective_frames = min(frames if frames is not None else max_frames, max_frames)
+        result = self.simulate(preview_scene, frames=effective_frames, preview=True)
         result["preview"] = True
         result["effective_settings"] = {
             "duration": preview_scene.settings.duration,
+            "fps": preview_scene.settings.fps,
+            "substeps": preview_scene.settings.substeps,
+            "solver_iterations": preview_scene.settings.solver_iterations,
+            "frames": effective_frames,
             "resolution": list(preview_scene.render.resolution),
             "max_particles": preview_scene.settings.max_particles,
             "fluids": {
@@ -1055,6 +1120,13 @@ class SceneExecutorLocal:
         }
         result.pop("state_frames", None)
         result.pop("contact_records", None)
+        result["original_sizes"] = original_sizes
+        result["effective_sizes"] = effective_sizes
+        result["elapsed_seconds"] = round(time.monotonic() - started, 3)
+        result["budget_warnings"] = [
+            item for item in preview_report["diagnostics"] if item["code"].startswith("resource_budget")
+        ]
+        result["recommended_actions"] = _preview_recommended_actions(result)
         return result
 
     def render(self, scene: Scene, *, output: Path) -> dict[str, Any]:
@@ -1720,7 +1792,7 @@ class SceneExecutorLocal:
             if rendered["status"] != "completed"
             else ("completed" if physics_valid else "physics_failed")
         )
-        return {
+        result = {
             **rendered,
             "status": status,
             "scene": scene.name,
@@ -1737,6 +1809,18 @@ class SceneExecutorLocal:
                 "cache": str(output_dir / "cache"),
             },
         }
+        manifest_path = output_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else {}
+        manifest.update(
+            status=result["status"],
+            stage=result["stage"],
+            frame=cache_metadata.get("frame_count", manifest.get("total_frames", 0)),
+            artifacts=result["artifacts"],
+        )
+        temporary = manifest_path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(manifest_path)
+        return result
 
     def export(self, scene: Scene, *, output: Path, format: str) -> dict[str, Any]:
         """Export scene JSON or a reproducible Python program."""

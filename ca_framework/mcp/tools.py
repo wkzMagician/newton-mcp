@@ -6,6 +6,9 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
+import os
+import signal
 from concurrent.futures import Future, ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import asdict
@@ -48,6 +51,29 @@ class SceneExecutor(Protocol):
     def resume_render(self, scene: Scene, *, output_dir: Path) -> dict[str, Any]: ...
 
 
+def _preview_worker(executor: SceneExecutor, scene: Scene, frames: int | None, connection: Any) -> None:
+    """Run preview in a process group that the parent can terminate atomically."""
+    os.setsid()
+    try:
+        connection.send((True, executor.preview(scene, frames=frames)))
+    except BaseException as error:
+        connection.send((False, f"{type(error).__name__}: {error}"))
+    finally:
+        connection.close()
+
+
+def _terminate_preview_process(process: multiprocessing.Process, sig: signal.Signals) -> None:
+    """Signal a preview and its group when isolated, otherwise signal the child itself."""
+    try:
+        process_group = os.getpgid(process.pid)
+        if process_group == process.pid:
+            os.killpg(process_group, sig)
+        else:
+            os.kill(process.pid, sig)
+    except ProcessLookupError:
+        pass
+
+
 class SceneTools:
     """Safe scene editing operations shared by MCP and local callers."""
 
@@ -80,10 +106,30 @@ class SceneTools:
             "objects": ["rigid", "cloth", "fluid", "container"],
             "rigid_shapes": ["box", "sphere", "capsule", "compound"],
             "fluid_phases": ["smoke", "liquid"],
-            "solvers": {"rigid_and_cloth": "xpbd", "smoke": "smoke", "liquid": "apic"},
+            "solvers": {
+                "rigid": ["xpbd", "vbd"],
+                "cloth": {"recommended": "vbd", "supported": ["xpbd", "vbd"]},
+                "smoke": "smoke",
+                "liquid": "apic",
+            },
             "actions": ["transform", "impulse", "force", "emit"],
             "outputs": ["mp4", "scene-json", "python", "metrics", "diagnostics"],
             "camera": {"modes": ["auto", "look-at"], "supports_up": True},
+            "recommended_simulation": {
+                "rigid": {"fps": [30, 60], "substeps": [4, 12]},
+                "cloth": {"fps": [30, 30], "substeps": [8, 12]},
+                "smoke": {"fps": [20, 30], "substeps": [1, 4]},
+                "liquid": {"fps": [20, 25], "substeps": [2, 8]},
+            },
+            "preview_limits": {
+                "duration": 1.0,
+                "fps": 30,
+                "substeps": 12,
+                "solver_iterations": 10,
+                "resolution": [640, 360],
+                "liquid_capacity": 50_000,
+                "cloth_axis": 24,
+            },
         }
 
     def set_camera(
@@ -236,7 +282,36 @@ class SceneTools:
 
     def preview_scene(self, scene_name: str, frames: int | None = None) -> dict[str, Any]:
         """Run a short preview and return keyframes and metrics."""
-        return self._executor().preview(self.store.load(scene_name), frames=frames)
+        timeout = float(os.environ.get("CA_SCENE_PREVIEW_TIMEOUT", "90"))
+        parent, child = multiprocessing.Pipe(duplex=False)
+        # Spawn is required here: forking a process after Warp or FastMCP has
+        # initialized threads can deadlock before the child reaches its target.
+        process = multiprocessing.get_context("spawn").Process(
+            target=_preview_worker,
+            args=(self._executor(), self.store.load(scene_name), frames, child),
+        )
+        process.start()
+        child.close()
+        process.join(timeout)
+        if process.is_alive():
+            _terminate_preview_process(process, signal.SIGTERM)
+            process.join(5.0)
+            if process.is_alive():
+                _terminate_preview_process(process, signal.SIGKILL)
+                process.join(5.0)
+            return {
+                "status": "preview_timeout",
+                "preview": True,
+                "elapsed_seconds": timeout,
+                "diagnostics": [{"code": "preview_timeout", "message": f"Preview exceeded {timeout:g} seconds."}],
+                "recommended_actions": ["Reduce one simulation scale dimension before retrying preview."],
+            }
+        if not parent.poll():
+            return {"status": "preview_failed", "preview": True, "diagnostics": [{"code": "preview_worker_exit"}]}
+        succeeded, value = parent.recv()
+        if not succeeded:
+            raise RuntimeError(value)
+        return value
 
     def run_scene(self, scene_name: str, output_dir: str) -> dict[str, Any]:
         """Asynchronously create a durable simulation and rendering bundle."""

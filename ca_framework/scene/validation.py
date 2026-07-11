@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass
 from itertools import pairwise
 from math import isfinite, prod, sqrt
@@ -38,23 +39,50 @@ class SceneDiagnostic:
     severity: Literal["error", "warning"] = "error"
 
 
+RESOURCE_THRESHOLDS = {
+    "simulation_frames": (150, 300),
+    "simulation_steps": (1_800, 3_600),
+    "solver_work": (18_000, 36_000),
+    "max_cloth_vertices": (625, 1_024),
+    "total_cloth_vertices": (1_000, 2_000),
+    "estimated_initial_liquid_particles": (30_000, 75_000),
+    "estimated_emitted_particles": (50_000, 150_000),
+    "liquid_capacity": (100_000, 250_000),
+    "smoke_grid_cells": (32**3, 64**3),
+    "liquid_grid_cells": (24**3, 40**3),
+    "estimated_gpu_memory_bytes": (1 << 30, 3 << 30),
+    "render_pixel_frames": (1280 * 720 * 150, 1920 * 1080 * 300),
+}
+
+
 def estimate_resources(scene: Scene) -> dict[str, int]:
     """Estimate particles, grid cells, and rendered frames."""
     particles = 0
     initial_particles = 0
     emitted_particles = 0
     grid_cells = 0
+    smoke_grid_cells = 0
+    liquid_grid_cells = 0
+    cloth_counts: list[int] = []
+    initial_liquid_particles = 0
     for item in scene.objects.values():
         if isinstance(item, ObjectCloth):
             count = prod(item.resolution)
+            cloth_counts.append(count)
             particles += count
             initial_particles += count
         elif isinstance(item, ObjectFluid):
-            grid_cells += prod(item.grid_resolution)
+            cells = prod(item.grid_resolution)
+            grid_cells += cells
+            if item.phase == "smoke":
+                smoke_grid_cells += cells
+            else:
+                liquid_grid_cells += cells
             if item.phase == "liquid" and item.particle_spacing > 0.0:
                 count = prod(max(1, int(size / item.particle_spacing)) for size in item.size)
                 particles += count
                 initial_particles += count
+                initial_liquid_particles += count
                 for emitter in item.emitters:
                     active_substeps = max(
                         0,
@@ -72,15 +100,30 @@ def estimate_resources(scene: Scene) -> dict[str, int]:
     has_liquid = any(isinstance(item, ObjectFluid) and item.phase == "liquid" for item in scene.objects.values())
     particle_capacity = scene.settings.max_particles if has_liquid else particles
     estimated_bytes = particle_capacity * 64 + grid_cells * 64
+    required_liquid_capacity = max(initial_liquid_particles + emitted_particles, liquid_grid_cells * 5)
+    simulation_frames = round(scene.settings.duration * scene.settings.fps)
+    simulation_steps = simulation_frames * scene.settings.substeps
+    render_frames = round(scene.settings.duration * scene.render.fps)
     return {
         "particles": particles,
         "estimated_initial_particles": initial_particles,
         "estimated_emitted_particles": emitted_particles,
+        "estimated_initial_liquid_particles": initial_liquid_particles,
         "particle_capacity": scene.settings.max_particles if has_liquid else particles,
         "grid_cells": grid_cells,
-        "simulation_frames": round(scene.settings.duration * scene.settings.fps),
-        "render_frames": round(scene.settings.duration * scene.render.fps),
+        "smoke_grid_cells": smoke_grid_cells,
+        "liquid_grid_cells": liquid_grid_cells,
+        "simulation_frames": simulation_frames,
+        "simulation_steps": simulation_steps,
+        "solver_work": simulation_steps * scene.settings.solver_iterations,
+        "max_cloth_vertices": max(cloth_counts, default=0),
+        "total_cloth_vertices": sum(cloth_counts),
+        "liquid_capacity": scene.settings.max_particles if has_liquid else 0,
+        "required_liquid_capacity": required_liquid_capacity,
+        "render_frames": render_frames,
+        "render_pixel_frames": prod(scene.render.resolution) * render_frames,
         "estimated_memory_bytes": estimated_bytes,
+        "estimated_gpu_memory_bytes": estimated_bytes * 4,
         "estimated_contact_pairs": sum(
             1
             for index, item_a in enumerate(scene.objects.values())
@@ -90,7 +133,7 @@ def estimate_resources(scene: Scene) -> dict[str, int]:
     }
 
 
-def validate_scene(scene: Scene) -> dict[str, Any]:
+def validate_scene(scene: Scene, *, allow_over_budget: bool | None = None) -> dict[str, Any]:
     """Validate references, dimensions, solver routing, penetration, and budget."""
     findings: list[SceneDiagnostic] = []
 
@@ -340,6 +383,35 @@ def validate_scene(scene: Scene) -> dict[str, Any]:
             f"Estimated {resources['particles']} particles exceeds the {scene.settings.max_particles} budget.",
             "Increase particle spacing, lower cloth resolution, or explicitly raise the budget.",
         )
+    if resources["required_liquid_capacity"] > resources["liquid_capacity"]:
+        error(
+            "settings.max_particles",
+            "liquid_capacity_insufficient",
+            "Liquid capacity is below the adaptive grid-resampling requirement "
+            f"({resources['required_liquid_capacity']} estimated, {resources['liquid_capacity']} configured).",
+            "Reduce liquid grid resolution or initial/emitted volume; do not exceed the hard capacity budget.",
+        )
+
+    if allow_over_budget is None:
+        allow_over_budget = os.environ.get("CA_SCENE_ALLOW_OVER_BUDGET", "").lower() in {"1", "true", "yes"}
+    for metric, (warning_limit, error_limit) in RESOURCE_THRESHOLDS.items():
+        value = resources[metric]
+        if value > error_limit:
+            error(
+                f"resources.{metric}",
+                "resource_budget_exceeded",
+                f"Estimated {metric} ({value}) exceeds the hard budget ({error_limit}).",
+                "Reduce scene scale or explicitly enable the evaluator over-budget override.",
+                "warning" if allow_over_budget else "error",
+            )
+        elif value > warning_limit:
+            error(
+                f"resources.{metric}",
+                "resource_budget_warning",
+                f"Estimated {metric} ({value}) exceeds the recommended budget ({warning_limit}).",
+                "Reduce one source of simulation or rendering work before previewing.",
+                "warning",
+            )
 
     # Conservative AABB overlap catches obvious initial rigid/container penetrations.
     solids = [(key, item) for key, item in scene.objects.items() if isinstance(item, (ObjectRigid, ObjectContainer))]
@@ -405,6 +477,7 @@ def validate_scene(scene: Scene) -> dict[str, Any]:
         "valid": not any(item.severity == "error" for item in findings),
         "diagnostics": [asdict(item) for item in findings],
         "resources": resources,
+        "allow_over_budget": allow_over_budget,
         "pipeline": select_pipeline(scene),
     }
 

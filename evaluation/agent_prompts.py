@@ -34,7 +34,7 @@ Execution requirements:
 4. If validation or preview reports a problem, repair it with MCP editing tools. Use at most three repair rounds.
 5. Call preview_scene before the final run.
 6. Call run_scene with output_dir set exactly to {output_dir}.
-7. Poll get_job until it reports completed or failed. Do not exit while the job is queued or running.
+7. Poll get_job only while it reports queued or running. Treat completed, failed, physics_failed, cancelled, and interrupted as terminal statuses.
 8. Report success only when the job completed and animation.mp4, scene.json, program.py, metrics.json, diagnostics.jsonl, and cache/ were produced.
 """
 
