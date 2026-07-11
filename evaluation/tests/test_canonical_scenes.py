@@ -120,6 +120,7 @@ class TestCanonicalScenes(unittest.TestCase):
         inside = right & (particles[:, 0] < 1.15) & (np.abs(particles[:, 1]) < 0.45)
         self.assertGreater(masses[right].sum() / masses.sum(), 0.5)
         self.assertGreater(masses[inside].sum() / masses.sum(), 0.5)
+        self.assertEqual(np.count_nonzero(particles[:, 2] > 0.8), 0)
 
     def test_09_ball_sinks_and_creates_splash(self):
         scene = canonical_scenes()["09_liquid_splash"]

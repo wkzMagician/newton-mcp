@@ -284,17 +284,17 @@ def canonical_scenes() -> dict[str, Scene]:
                     "id": "water",
                     "kind": "fluid",
                     "phase": "liquid",
-                    "size": [0.2, 0.4, 0.2],
+                    "size": [0.1, 0.4, 0.12],
                     "grid_resolution": [24, 12, 16],
                     "particle_spacing": 0.08,
-                    "transform": {"position": [0.2, 0.0, 1.15]},
+                    "transform": {"position": [0.25, 0.0, 1.15]},
                     "emitters": [
                         {
-                            "position": [0.2, 0.0, 1.15],
-                            "size": [0.2, 0.4, 0.2],
+                            "position": [0.25, 0.0, 1.15],
+                            "size": [0.1, 0.4, 0.12],
                             "start_time": 0.0,
                             "end_time": 0.6,
-                            "velocity": [0.8, 0.0, -0.3],
+                            "velocity": [1.0, 0.0, -0.65],
                         }
                     ],
                 },
