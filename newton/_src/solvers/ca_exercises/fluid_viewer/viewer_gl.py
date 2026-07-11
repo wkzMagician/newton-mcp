@@ -15,12 +15,13 @@ from ....viewer import ViewerGL
 
 SSFR_RADIUS_SCALE = 1.35
 SSFR_DEPTH_BLUR_RADIUS = 5
+SSFR_DEPTH_SMOOTHING_ITERATIONS = 8
 SSFR_THICKNESS_BLUR_RADIUS = 7
-SSFR_DEPTH_FALLOFF = 35.0
+SSFR_DEPTH_FALLOFF = 8.0
 SSFR_THICKNESS_SCALE = 4.8
 SSFR_REFRACTION = 0.022
 SSFR_FRESNEL_POWER = 5.2
-SSFR_SPECULAR_STRENGTH = 0.8
+SSFR_SPECULAR_STRENGTH = 0.08
 SSFR_FLUID_COLOR = (0.08, 0.26, 0.5)
 SSFR_ABSORPTION = (0.9, 0.32, 0.11)
 SSFR_BASE_ALPHA = 0.035
@@ -365,6 +366,7 @@ class ScreenSpaceFluidRenderer:
         self.particle_radius = float(particle_radius)
         self.radius_scale = SSFR_RADIUS_SCALE
         self.depth_blur_radius = SSFR_DEPTH_BLUR_RADIUS
+        self.depth_smoothing_iterations = SSFR_DEPTH_SMOOTHING_ITERATIONS
         self.thickness_blur_radius = SSFR_THICKNESS_BLUR_RADIUS
         self.depth_falloff = SSFR_DEPTH_FALLOFF
         self.thickness_scale = SSFR_THICKNESS_SCALE
@@ -672,8 +674,7 @@ class ScreenSpaceFluidRenderer:
         gl.glBindVertexArray(0)
 
         # Pass 3: blur depth and thickness.
-        self._blur_depth(self._depth_tex, self._depth_ping_tex, texel)
-        self._blur_depth(self._depth_ping_tex, self._depth_tex, texel, horizontal=False)
+        self._smooth_depth(texel)
         self._blur_thickness(self._thickness_tex, self._thickness_ping_tex, texel)
         self._blur_thickness(self._thickness_ping_tex, self._thickness_tex, texel, horizontal=False)
 
@@ -735,6 +736,12 @@ class ScreenSpaceFluidRenderer:
         gl.glActiveTexture(gl.GL_TEXTURE0)
         gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
         gl.glUseProgram(0)
+
+    def _smooth_depth(self, texel: np.ndarray) -> None:
+        """Smooth sphere depth while preserving the reconstructed fluid boundary."""
+        for _ in range(self.depth_smoothing_iterations):
+            self._blur_depth(self._depth_tex, self._depth_ping_tex, texel)
+            self._blur_depth(self._depth_ping_tex, self._depth_tex, texel, horizontal=False)
 
     def _set_particle_uniforms(self, uniforms: dict[str, int], view: np.ndarray, proj: np.ndarray, height: int):
         gl = self._gl

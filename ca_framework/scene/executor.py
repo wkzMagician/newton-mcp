@@ -1364,7 +1364,7 @@ class SceneExecutorLocal:
                     renderer = RendererFluidScreenSpace(
                         viewer,
                         max_particles=scene.settings.max_particles,
-                        particle_radius=item.particle_spacing * 0.8,
+                        particle_radius=item.particle_spacing * 1.1,
                         device=device,
                     )
                     viewer.register_post_render_callback(renderer.render)

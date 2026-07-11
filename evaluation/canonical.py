@@ -286,7 +286,7 @@ def canonical_scenes() -> dict[str, Scene]:
                     "phase": "liquid",
                     "size": [0.2, 0.4, 0.2],
                     "grid_resolution": [24, 12, 16],
-                    "particle_spacing": 0.12,
+                    "particle_spacing": 0.08,
                     "transform": {"position": [0.2, 0.0, 1.15]},
                     "emitters": [
                         {
@@ -299,7 +299,7 @@ def canonical_scenes() -> dict[str, Scene]:
                     ],
                 },
             },
-            "settings": {"duration": 5.0, "fps": 20, "substeps": 2, "max_particles": 10000},
+            "settings": {"duration": 5.0, "fps": 20, "substeps": 2, "max_particles": 30000},
             "render": {
                 "ground": False,
                 "camera": {
@@ -325,7 +325,7 @@ def canonical_scenes() -> dict[str, Scene]:
                     "phase": "liquid",
                     "size": [1.35, 0.75, 0.45],
                     "grid_resolution": [20, 12, 14],
-                    "particle_spacing": 0.13,
+                    "particle_spacing": 0.065,
                     "transform": {"position": [0.0, 0.0, 0.3]},
                 },
                 "ball": {
@@ -337,7 +337,7 @@ def canonical_scenes() -> dict[str, Scene]:
                     "physical_material": {"density": 7800.0},
                 },
             },
-            "settings": {"duration": 5.0, "fps": 25, "substeps": 2, "max_particles": 12000},
+            "settings": {"duration": 5.0, "fps": 25, "substeps": 2, "max_particles": 30000},
             "render": {
                 "ground": False,
                 "camera": {
@@ -363,7 +363,7 @@ def canonical_scenes() -> dict[str, Scene]:
                     "phase": "liquid",
                     "size": [1.75, 0.95, 0.6],
                     "grid_resolution": [22, 14, 14],
-                    "particle_spacing": 0.14,
+                    "particle_spacing": 0.07,
                     "transform": {"position": [0.0, 0.0, 0.38]},
                 },
                 **{
@@ -378,7 +378,7 @@ def canonical_scenes() -> dict[str, Scene]:
                     for index in range(3)
                 },
             },
-            "settings": {"duration": 5.0, "fps": 20, "substeps": 2, "max_particles": 15000},
+            "settings": {"duration": 5.0, "fps": 20, "substeps": 2, "max_particles": 30000},
             "render": {
                 "ground": False,
                 "camera": {

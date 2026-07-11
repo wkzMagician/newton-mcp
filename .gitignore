@@ -77,3 +77,17 @@ docs/_static/viser/
 # Prompt-to-video evaluation outputs and isolated agent workspaces
 /evaluation/results/
 /evaluation/workspaces/
+
+# Local browser testing and web-scraping artifacts
+/.firecrawl/
+/node_modules/
+/e2e/
+/playwright-report/
+/test-results/
+/blob-report/
+/playwright/.cache/
+/playwright/.auth/
+/package.json
+/package-lock.json
+/playwright.config.ts
+/.github/workflows/playwright.yml
