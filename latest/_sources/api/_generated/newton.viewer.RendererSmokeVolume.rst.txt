@@ -1,0 +1,8 @@
+﻿newton.viewer.RendererSmokeVolume
+=================================
+
+.. autoclass:: newton.viewer.RendererSmokeVolume
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   :member-order: groupwise

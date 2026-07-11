@@ -1,0 +1,8 @@
+﻿newton.solvers.SolverFluidAPIC
+==============================
+
+.. autoclass:: newton.solvers.SolverFluidAPIC
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   :member-order: groupwise

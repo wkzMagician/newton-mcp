@@ -1,0 +1,6 @@
+﻿newton.viewer.init\_fluid\_viewer
+=================================
+
+.. currentmodule:: newton.viewer
+
+.. autofunction:: init_fluid_viewer

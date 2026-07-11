@@ -1,0 +1,8 @@
+﻿newton.solvers.SolverFluidSmoke
+===============================
+
+.. autoclass:: newton.solvers.SolverFluidSmoke
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   :member-order: groupwise
