@@ -1039,8 +1039,10 @@ class SceneExecutorLocal:
             software_markers = ("llvmpipe", "softpipe", "software rasterizer", "osmesa")
             if any(marker in gl_renderer.lower() for marker in software_markers):
                 raise RuntimeError(f"Hardware OpenGL is required; detected software renderer: {gl_renderer}")
-            viewer.set_model(compiled.model)
             camera = scene.render.camera
+            if camera.position is not None:
+                SceneExecutorLocal._hide_near_container_walls(scene, compiled, np.asarray(camera.position, dtype=float))
+            viewer.set_model(compiled.model)
             if camera.position is not None and camera.target is not None:
                 position = np.asarray(camera.position, dtype=float)
                 direction = np.asarray(camera.target, dtype=float) - position
@@ -1049,6 +1051,8 @@ class SceneExecutorLocal:
                 pitch = math.degrees(math.asin(np.clip(direction[2], -1.0, 1.0)))
                 viewer.set_camera(wp.vec3(*position), pitch, yaw)
                 viewer.camera.fov = camera.field_of_view
+            elif camera.auto_frame:
+                SceneExecutorLocal._set_auto_camera(viewer, scene)
             smoke_renderers = {}
             liquid_renderers = {}
             for object_id, item in scene.objects.items():
@@ -1069,7 +1073,7 @@ class SceneExecutorLocal:
                     renderer = RendererFluidScreenSpace(
                         viewer,
                         max_particles=scene.settings.max_particles,
-                        particle_radius=item.particle_spacing * 0.55,
+                        particle_radius=item.particle_spacing * 0.8,
                         device=device,
                     )
                     viewer.register_post_render_callback(renderer.render)
@@ -1126,6 +1130,39 @@ class SceneExecutorLocal:
             if viewer is not None:
                 with suppress(Exception):
                     viewer.close()
+
+    @staticmethod
+    def _set_auto_camera(viewer: Any, scene: Scene) -> None:
+        """Frame scene objects from an elevated oblique direction."""
+        centers = np.asarray([item.transform.position for item in scene.objects.values()], dtype=float)
+        if not len(centers):
+            return
+        target = centers.mean(axis=0)
+        spans = np.ptp(centers, axis=0)
+        radius = max(1.0, float(np.linalg.norm(spans)) * 0.7)
+        position = target + np.asarray((radius * 1.35, -radius * 1.7, radius * 0.95))
+        direction = target - position
+        direction /= max(np.linalg.norm(direction), 1.0e-8)
+        yaw = math.degrees(math.atan2(direction[1], direction[0]))
+        pitch = math.degrees(math.asin(np.clip(direction[2], -1.0, 1.0)))
+        viewer.set_camera(wp.vec3(*position), pitch, yaw)
+        viewer.camera.fov = scene.render.camera.field_of_view
+
+    @staticmethod
+    def _hide_near_container_walls(scene: Scene, compiled: Any, camera_position: np.ndarray) -> None:
+        """Hide the camera-facing wall in the render-only container model."""
+        scales = compiled.model.shape_scale.numpy()
+        changed = False
+        for item in scene.objects.values():
+            if not isinstance(item, ObjectContainer) or not item.transparent_shell:
+                continue
+            colliders = compiled.container_colliders[item.id]
+            indices = compiled.shape_indices[item.id]
+            for wall_slot in range(1, len(colliders)):
+                scales[indices[wall_slot]] = 0.0
+            changed = True
+        if changed:
+            SceneExecutorLocal._copy_array(compiled.model.shape_scale, scales)
 
     def run(
         self,

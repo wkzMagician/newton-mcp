@@ -45,7 +45,8 @@ def canonical_scenes() -> dict[str, Scene]:
                     "transform": {"position": [0.45, 0.0, 2.2]},
                 },
             },
-            "settings": {"duration": 1.5, "fps": 30, "substeps": 4},
+            "settings": {"duration": 2.0, "fps": 30, "substeps": 4},
+            "render": {"camera": {"position": [2.8, -4.2, 2.8], "target": [0.0, 0.0, 1.2]}},
         },
         "02_domino_wave": {
             "objects": {
@@ -76,6 +77,7 @@ def canonical_scenes() -> dict[str, Scene]:
                 }
             },
             "settings": {"duration": 2.0, "fps": 40, "substeps": 8},
+            "render": {"camera": {"position": [2.8, -4.0, 2.2], "target": [0.35, 0.0, 0.4]}},
         },
         "03_ramp_bounce": {
             "objects": {
@@ -106,6 +108,7 @@ def canonical_scenes() -> dict[str, Scene]:
                 },
             },
             "settings": {"duration": 2.5, "fps": 40, "substeps": 5},
+            "render": {"camera": {"position": [2.8, -3.8, 2.3], "target": [0.1, 0.0, 0.75]}},
         },
         "04_cloth_ball": {
             "objects": {
@@ -131,7 +134,8 @@ def canonical_scenes() -> dict[str, Scene]:
                     "transform": {"position": [0.0, 0.0, 2.2]},
                 },
             },
-            "settings": {"duration": 1.2, "fps": 30, "substeps": 12},
+            "settings": {"duration": 1.8, "fps": 30, "substeps": 12},
+            "render": {"camera": {"position": [2.5, -3.5, 2.5], "target": [0.0, 0.0, 1.0]}},
         },
         "05_hanging_cloth": {
             "objects": {
@@ -163,7 +167,7 @@ def canonical_scenes() -> dict[str, Scene]:
             "render": {
                 "ground": False,
                 "camera": {
-                    "position": [0.0, -4.0, 1.5],
+                    "position": [2.5, -3.8, 2.1],
                     "target": [0.0, 0.0, 1.5],
                     "up": [0.0, 0.0, 1.0],
                     "auto_frame": False,
@@ -198,7 +202,8 @@ def canonical_scenes() -> dict[str, Scene]:
                     "transform": {"position": [0.55, 0.0, 0.55]},
                 },
             },
-            "settings": {"duration": 1.4, "fps": 30, "substeps": 5},
+            "settings": {"duration": 2.0, "fps": 30, "substeps": 5},
+            "render": {"camera": {"position": [2.8, -4.0, 2.5], "target": [0.0, 0.0, 0.8]}},
         },
         "07_smoke_partitions": {
             "objects": {
@@ -242,7 +247,7 @@ def canonical_scenes() -> dict[str, Scene]:
             "render": {
                 "ground": False,
                 "camera": {
-                    "position": [0.0, -4.0, 1.0],
+                    "position": [2.2, -3.3, 2.2],
                     "target": [0.0, 0.0, 1.0],
                     "up": [0.0, 0.0, 1.0],
                     "auto_frame": False,
@@ -290,8 +295,8 @@ def canonical_scenes() -> dict[str, Scene]:
             "render": {
                 "ground": False,
                 "camera": {
-                    "position": [0.0, -4.0, 0.8],
-                    "target": [0.0, 0.0, 0.8],
+                    "position": [2.1, -3.2, 2.2],
+                    "target": [0.1, 0.0, 0.65],
                     "up": [0.0, 0.0, 1.0],
                     "auto_frame": False,
                 },
@@ -328,8 +333,8 @@ def canonical_scenes() -> dict[str, Scene]:
             "render": {
                 "ground": False,
                 "camera": {
-                    "position": [0.0, -4.0, 0.7],
-                    "target": [0.0, 0.0, 0.7],
+                    "position": [2.2, -3.4, 2.0],
+                    "target": [0.0, 0.0, 0.55],
                     "up": [0.0, 0.0, 1.0],
                     "auto_frame": False,
                 },
@@ -369,8 +374,8 @@ def canonical_scenes() -> dict[str, Scene]:
             "render": {
                 "ground": False,
                 "camera": {
-                    "position": [0.0, -4.0, 0.65],
-                    "target": [0.0, 0.0, 0.65],
+                    "position": [2.5, -3.8, 2.1],
+                    "target": [0.0, 0.0, 0.55],
                     "up": [0.0, 0.0, 1.0],
                     "auto_frame": False,
                 },

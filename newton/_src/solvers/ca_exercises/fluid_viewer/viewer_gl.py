@@ -824,6 +824,30 @@ class FluidViewerGL(ViewerGL):
         for callback in self._post_render_callbacks:
             callback(self)
 
+        # Post-render effects composite onto the default framebuffer, while
+        # ViewerGL.get_frame() captures the viewer's off-screen framebuffer.
+        # Copy the completed image back so headless captures include smoke and
+        # screen-space fluid rendering.
+        if self._post_render_callbacks:
+            gl = self.renderer.gl
+            width = self.renderer._screen_width
+            height = self.renderer._screen_height
+            gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, 0)
+            gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, self.renderer._frame_fbo)
+            gl.glBlitFramebuffer(
+                0,
+                0,
+                width,
+                height,
+                0,
+                0,
+                width,
+                height,
+                gl.GL_COLOR_BUFFER_BIT,
+                gl.GL_NEAREST,
+            )
+            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
+
         self._update_fps()
 
         if self.ui and self.ui.is_available and self.show_ui:
