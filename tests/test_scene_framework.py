@@ -557,13 +557,45 @@ class TestSceneFramework(unittest.TestCase):
             identity,
             0.01,
         )
-        for correction, weights in (
-            (sphere, sphere_weights),
-            (box, box_weights),
-            (plane, plane_weights),
+        for name, correction, weights in (
+            ("sphere", sphere, sphere_weights),
+            ("box", box, box_weights),
+            ("plane", plane, plane_weights),
         ):
-            self.assertIsNotNone(correction)
+            self.assertIsNotNone(correction, name)
             self.assertAlmostEqual(float(weights.sum()), 1.0)
+
+    def test_triangle_contact_moves_dynamic_rigid_body(self):
+        scene = Scene.from_dict(
+            {
+                "name": "cloth_dynamic_response",
+                "objects": {
+                    "cloth": {
+                        "id": "cloth",
+                        "kind": "cloth",
+                        "size": [1.0, 1.0],
+                        "resolution": [3, 3],
+                        "thickness": 0.02,
+                        "transform": {"position": [-0.5, -0.5, 0.0]},
+                        "pinned": [
+                            {"kind": "uv-corners", "corners": ["bottom-left", "bottom-right", "top-left", "top-right"]}
+                        ],
+                    },
+                    "ball": {
+                        "id": "ball",
+                        "kind": "rigid",
+                        "shape": "sphere",
+                        "size": [0.2, 0.2, 0.2],
+                        "physical_material": {"density": 10.0},
+                        "transform": {"position": [0.0, 0.0, 0.05]},
+                    },
+                },
+                "settings": {"duration": 0.05, "fps": 20, "substeps": 2, "gravity": [0.0, 0.0, 0.0]},
+                "render": {"ground": False},
+            }
+        )
+        result = SceneExecutorLocal().simulate(scene, capture_cache=True)
+        self.assertGreater(result["state_frames"][-1]["body_q"][0, 2], 0.05)
 
 
 if __name__ == "__main__":

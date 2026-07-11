@@ -121,6 +121,7 @@ class ObjectCloth(ObjectBase):
     bend_damping: float | None = None
     air_drag: float = 0.0
     collision_radius: float | None = None
+    max_stretch_ratio: float = 1.2
     self_collision: bool = False
     pinned: list[VertexSelector] = field(default_factory=list)
 

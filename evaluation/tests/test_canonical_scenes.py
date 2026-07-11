@@ -65,6 +65,9 @@ class TestCanonicalScenes(unittest.TestCase):
         self.assertGreater(result["metrics"]["soft_contacts"], 0)
         self.assertIn(["ball", "cloth"], result["metrics"]["soft_contact_pairs"])
         self.assertLess(result["metrics"]["max_soft_penetration"], 0.1)
+        quality = result["metrics"]["cloth"]["cloth"]
+        self.assertLessEqual(quality["max_edge_length_ratio"], 1.151)
+        self.assertEqual(quality["flipped_triangle_count"], 0)
 
     def test_05_hanging_cloth_descends_and_swings(self):
         frames = _result("05_hanging_cloth")["state_frames"]
@@ -82,6 +85,22 @@ class TestCanonicalScenes(unittest.TestCase):
         self.assertGreater(result["metrics"]["soft_contacts"], 0)
         self.assertEqual(np.linalg.matrix_rank(cloth - cloth.mean(axis=0)), 3)
         self.assertGreater(float(cloth[:, 2].std()), 0.1)
+        quality = result["metrics"]["cloth"]["cloth"]
+        self.assertLessEqual(result["metrics"]["max_soft_penetration"], 0.025)
+        self.assertLessEqual(quality["max_edge_length_ratio"], 1.201)
+        self.assertLess(quality["max_speed"], 0.2)
+        self.assertEqual(quality["flipped_triangle_count"], 0)
+        self.assertEqual(
+            result["metrics"]["soft_contact_pairs"],
+            [["cloth", "left"], ["cloth", "right"]],
+        )
+        first_contact = result["metrics"]["first_contact_time"]
+        for frame_index, frame in enumerate(result["state_frames"]):
+            time_value = (frame_index + 1) / canonical_scenes()["06_cloth_blocks"].settings.fps
+            if time_value >= first_contact:
+                break
+            speed = float(np.linalg.norm(frame["cloth_qd"], axis=1).max())
+            self.assertLessEqual(speed, 9.81 * time_value + 0.3)
 
     def test_07_smoke_is_finite_expands_and_crosses_partitions(self):
         result = _result("07_smoke_partitions")

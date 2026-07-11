@@ -122,6 +122,7 @@ def canonical_scenes() -> dict[str, Scene]:
                     "stretch_stiffness": 60000.0,
                     "area_stiffness": 60000.0,
                     "bend_stiffness": 20.0,
+                    "max_stretch_ratio": 1.15,
                     "damping": 2.0,
                     "transform": {"position": [-1.0, -1.0, 1.2]},
                     "pinned": [
@@ -189,8 +190,9 @@ def canonical_scenes() -> dict[str, Scene]:
                     "thickness": 0.025,
                     "stretch_stiffness": 50000.0,
                     "area_stiffness": 50000.0,
-                    "bend_stiffness": 20.0,
-                    "damping": 2.0,
+                    "bend_stiffness": 50.0,
+                    "damping": 5.0,
+                    "max_stretch_ratio": 1.198,
                     "transform": {"position": [-1.2, -0.8, 1.8]},
                 },
                 "left": {
