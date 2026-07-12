@@ -7,11 +7,11 @@ from itertools import pairwise
 
 import numpy as np
 
-from ca_framework.scene import SceneExecutorLocal, validate_scene
+from ca_framework.scene import Scene, SceneExecutorLocal, validate_scene
 from evaluation.canonical import canonical_scenes
 
 
-@lru_cache(maxsize=10)
+@lru_cache(maxsize=12)
 def _result(name: str):
     return SceneExecutorLocal().simulate(canonical_scenes()[name], capture_cache=True)
 
@@ -19,7 +19,7 @@ def _result(name: str):
 class TestCanonicalScenes(unittest.TestCase):
     def test_all_canonical_scenes_validate(self):
         scenes = canonical_scenes()
-        self.assertEqual(len(scenes), 10)
+        self.assertEqual(len(scenes), 12)
         self.assertTrue(all(validate_scene(scene)["valid"] for scene in scenes.values()))
 
     def test_all_canonical_scenes_are_physically_valid(self):
@@ -68,6 +68,16 @@ class TestCanonicalScenes(unittest.TestCase):
         quality = result["metrics"]["cloth"]["cloth"]
         self.assertLessEqual(quality["max_edge_length_ratio"], 1.151)
         self.assertEqual(quality["flipped_triangle_count"], 0)
+        exchanges = [
+            exchange
+            for record in result["telemetry_records"]
+            for exchange in record["coupling_exchanges"]
+            if exchange["pair_type"] == "rigid-cloth"
+        ]
+        self.assertTrue(exchanges)
+        self.assertGreater(max(np.linalg.norm(item["linear_impulse_b"]) for item in exchanges), 0.0)
+        self.assertLessEqual(max(item["impulse_balance_error"] for item in exchanges), 1.0e-8)
+        self.assertLessEqual(max(item["angular_impulse_balance_error"] for item in exchanges), 1.0e-8)
 
     def test_05_hanging_cloth_descends_and_swings(self):
         frames = _result("05_hanging_cloth")["state_frames"]
@@ -78,6 +88,64 @@ class TestCanonicalScenes(unittest.TestCase):
         self.assertLess(lower_z[-1], lower_z[0])
         self.assertGreater(np.ptp(lower_y), 0.02)
         self.assertLess(np.ptp(lower_y[len(lower_y) // 2 :]), np.ptp(lower_y[: len(lower_y) // 2]))
+
+    def test_high_speed_oblique_ball_cloth_contact_records_friction(self):
+        scene = canonical_scenes()["04_cloth_ball"]
+        ball = scene.objects["ball"]
+        ball.transform.position = (0.0, 0.0, 1.8)
+        ball.linear_velocity = (2.0, 0.0, -5.0)
+        scene.objects["cloth"].physical_material.friction_dynamic = 0.8
+        result = SceneExecutorLocal().simulate(scene, frames=25, capture_cache=True)
+        exchanges = [
+            exchange
+            for record in result["telemetry_records"]
+            for exchange in record["coupling_exchanges"]
+            if exchange["pair_type"] == "rigid-cloth"
+        ]
+        self.assertEqual(result["status"], "completed", (result["diagnostics"], result["metrics"]["cloth"]))
+        self.assertTrue(exchanges)
+        self.assertGreater(max(item["normal_impulse"] for item in exchanges), 0.0)
+        self.assertGreater(max(item["tangential_impulse"] for item in exchanges), 0.0)
+        self.assertLessEqual(result["metrics"]["max_soft_penetration"], 0.1)
+
+    def test_cloth_transfers_impulse_to_dynamic_lightweight_block(self):
+        scene = Scene.from_dict(
+            {
+                "name": "cloth-dynamic-block",
+                "objects": {
+                    "cloth": {
+                        "id": "cloth",
+                        "kind": "cloth",
+                        "size": [1.2, 1.2],
+                        "resolution": [7, 7],
+                        "surface_density": 20.0,
+                        "stretch_stiffness": 30000.0,
+                        "damping": 1.0,
+                        "transform": {"position": [-0.6, -0.6, 1.25]},
+                    },
+                    "block": {
+                        "id": "block",
+                        "kind": "rigid",
+                        "shape": "box",
+                        "size": [0.6, 0.6, 0.4],
+                        "physical_material": {"density": 50.0},
+                        "transform": {"position": [0.0, 0.0, 0.3]},
+                    },
+                },
+                "settings": {"fps": 30, "substeps": 6, "duration": 1.5},
+            }
+        )
+        result = SceneExecutorLocal().simulate(scene, capture_cache=True)
+        exchanges = [
+            exchange
+            for record in result["telemetry_records"]
+            for exchange in record["coupling_exchanges"]
+            if exchange["pair_type"] == "rigid-cloth"
+        ]
+        self.assertEqual(result["status"], "completed", (result["diagnostics"], result["metrics"]["cloth"]))
+        self.assertTrue(exchanges)
+        self.assertGreater(max(np.linalg.norm(item["linear_impulse_b"]) for item in exchanges), 0.0)
+        self.assertLessEqual(max(item["impulse_balance_error"] for item in exchanges), 1.0e-8)
 
     def test_06_cloth_contacts_blocks_and_folds(self):
         result = _result("06_cloth_blocks")
@@ -94,6 +162,16 @@ class TestCanonicalScenes(unittest.TestCase):
             result["metrics"]["soft_contact_pairs"],
             [["cloth", "left"], ["cloth", "right"]],
         )
+        exchanges = [
+            exchange
+            for record in result["telemetry_records"]
+            for exchange in record["coupling_exchanges"]
+            if exchange["pair_type"] == "rigid-cloth"
+        ]
+        self.assertTrue(exchanges)
+        self.assertLessEqual(max(item["impulse_balance_error"] for item in exchanges), 1.0e-8)
+        self.assertAlmostEqual(sum(exchanges[0]["barycentric_weights"]), 1.0, places=5)
+        self.assertIsNotNone(exchanges[0]["contact_point"])
         first_contact = result["metrics"]["first_contact_time"]
         for frame_index, frame in enumerate(result["state_frames"]):
             time_value = (frame_index + 1) / canonical_scenes()["06_cloth_blocks"].settings.fps
@@ -147,6 +225,84 @@ class TestCanonicalScenes(unittest.TestCase):
         )
         self.assertIn(["block_0", "block_1"], result["metrics"]["contact_pairs"])
         self.assertGreater(result["metrics"]["first_active_contact_pair_times"]["block_0|block_1"], 0.0)
+
+    def test_moving_container_transfers_motion_to_liquid(self):
+        scene = Scene.from_dict(
+            {
+                "name": "moving-liquid-container",
+                "objects": {
+                    "tank": {
+                        "id": "tank",
+                        "kind": "container",
+                        "motion": "kinematic",
+                        "inner_size": [1.2, 1.0, 0.8],
+                        "wall_thickness": 0.06,
+                    },
+                    "water": {
+                        "id": "water",
+                        "kind": "fluid",
+                        "phase": "liquid",
+                        "size": [0.8, 0.7, 0.35],
+                        "grid_resolution": [12, 10, 10],
+                        "particle_spacing": 0.09,
+                        "transform": {"position": [0.0, 0.0, 0.25]},
+                    },
+                },
+                "actions": {
+                    "move": {
+                        "id": "move",
+                        "kind": "transform",
+                        "object_id": "tank",
+                        "keyframes": [
+                            {"time": 0.0, "transform": {"position": [0.0, 0.0, 0.0]}},
+                            {"time": 1.0, "transform": {"position": [0.35, 0.0, 0.0]}},
+                        ],
+                    }
+                },
+                "settings": {"fps": 20, "substeps": 2, "duration": 1.0, "max_particles": 10000},
+                "render": {"ground": False},
+            }
+        )
+        result = SceneExecutorLocal().simulate(scene, capture_cache=True)
+        centers = np.asarray([frame["water_particles"].mean(axis=0) for frame in result["state_frames"]])
+        self.assertEqual(result["status"], "completed")
+        self.assertGreater(centers[-1, 0] - centers[0, 0], 0.02)
+        self.assertLess(abs(result["metrics"]["fluid"]["water"]["relative_mass_change"]), 0.05)
+
+    def test_11_liquid_exchanges_impulse_with_membrane(self):
+        result = _result("11_liquid_cloth_membrane")
+        coupling = result["metrics"]["coupling"]
+        quality = result["metrics"]["cloth"]["membrane"]
+        penetration_count = result["metrics"]["fluid"]["water"]["cloth_penetration_count"]["membrane"]
+        self.assertGreater(coupling["exchange_count"], 0)
+        self.assertLessEqual(coupling["impulse_balance_error"], 1.0e-6)
+        self.assertLessEqual(coupling["angular_impulse_balance_error"], 1.0e-6)
+        self.assertEqual(quality["flipped_triangle_count"], 0)
+        self.assertLess(quality["max_edge_length_ratio"], 1.2)
+        self.assertLess(penetration_count, result["metrics"]["fluid"]["water"]["particles"])
+
+    def test_12_smoke_and_curtain_exchange_impulse(self):
+        result = _result("12_smoke_cloth_curtain")
+        coupling = result["metrics"]["coupling"]
+        quality = result["metrics"]["cloth"]["curtain"]
+        self.assertGreater(coupling["exchange_count"], 0)
+        self.assertLessEqual(coupling["impulse_balance_error"], 1.0e-6)
+        self.assertLessEqual(coupling["angular_impulse_balance_error"], 1.0e-6)
+        penetration = result["metrics"]["fluid"]["smoke"]["cloth_density_penetration"]
+        self.assertIn("curtain", penetration)
+        self.assertLessEqual(penetration["curtain"], 0.1)
+        self.assertEqual(quality["flipped_triangle_count"], 0)
+        self.assertLess(quality["max_edge_length_ratio"], 1.25)
+
+    def test_smoke_cloth_strong_coupling_runs_multiple_interface_iterations(self):
+        scene = canonical_scenes()["12_smoke_cloth_curtain"]
+        scene.settings.coupling.mode = "strong"
+        scene.settings.coupling.iterations = 2
+        scene.settings.coupling.interface_tolerance = 1.0e6
+        result = SceneExecutorLocal().simulate(scene, frames=2)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["metrics"]["coupling"]["coupling_iterations"], 2)
+        self.assertGreater(result["metrics"]["coupling"]["exchange_count"], 0)
 
 
 if __name__ == "__main__":

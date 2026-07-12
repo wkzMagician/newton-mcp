@@ -19,7 +19,7 @@ def _quat_x(angle: float) -> list[float]:
 
 
 def canonical_scenes() -> dict[str, Scene]:
-    """Return fresh instances of the ten canonical acceptance scenes."""
+    """Return fresh instances of the twelve canonical acceptance scenes."""
     scenes = {
         "01_rigid_contacts": {
             "objects": {
@@ -218,6 +218,7 @@ def canonical_scenes() -> dict[str, Scene]:
                 "substeps": 12,
                 "solver": "vbd",
                 "solver_iterations": 20,
+                "cloth": {"method": "vbd", "iterations": 20, "strain_limit_iterations": 5},
             },
             "render": {"camera": {"position": [2.8, -4.0, 2.5], "target": [0.0, 0.0, 0.8]}},
         },
@@ -387,6 +388,100 @@ def canonical_scenes() -> dict[str, Scene]:
                     "up": [0.0, 0.0, 1.0],
                     "auto_frame": False,
                 },
+            },
+        },
+        "11_liquid_cloth_membrane": {
+            "objects": {
+                "tank": {
+                    "id": "tank",
+                    "kind": "container",
+                    "motion": "static",
+                    "inner_size": [1.4, 1.4, 1.6],
+                    "wall_thickness": 0.05,
+                },
+                "membrane": {
+                    "id": "membrane",
+                    "kind": "cloth",
+                    "size": [1.1, 1.1],
+                    "resolution": [9, 9],
+                    "surface_density": 20.0,
+                    "thickness": 0.025,
+                    "stretch_stiffness": 30000.0,
+                    "bend_stiffness": 20.0,
+                    "damping": 2.0,
+                    "transform": {"position": [-0.55, -0.55, 0.65]},
+                    "pinned": [
+                        {"kind": "uv-corners", "corners": ["bottom-left", "bottom-right", "top-left", "top-right"]}
+                    ],
+                },
+                "water": {
+                    "id": "water",
+                    "kind": "fluid",
+                    "phase": "liquid",
+                    "size": [0.35, 0.35, 0.3],
+                    "grid_resolution": [16, 16, 18],
+                    "particle_spacing": 0.075,
+                    "transform": {"position": [0.0, 0.0, 1.15]},
+                },
+            },
+            "settings": {
+                "duration": 3.0,
+                "fps": 20,
+                "substeps": 8,
+                "max_particles": 25000,
+                "cloth": {"method": "vbd", "iterations": 20, "strain_limit_iterations": 10},
+                "fluid": {"pressure_iterations": 80},
+                "coupling": {"cloth_fluid_drag": 0.1, "cloth_permeability": 0.0},
+            },
+            "render": {
+                "ground": False,
+                "camera": {"position": [2.2, -3.0, 2.1], "target": [0.0, 0.0, 0.75]},
+            },
+        },
+        "12_smoke_cloth_curtain": {
+            "objects": {
+                "curtain": {
+                    "id": "curtain",
+                    "kind": "cloth",
+                    "size": [1.0, 1.2],
+                    "resolution": [9, 11],
+                    "surface_density": 20.0,
+                    "thickness": 0.02,
+                    "stretch_stiffness": 5000.0,
+                    "bend_stiffness": 5.0,
+                    "damping": 1.5,
+                    "transform": {"position": [-0.5, 0.0, 0.3], "rotation": _quat_x(math.pi * 0.5)},
+                    "pinned": [{"kind": "edge", "edge": "top"}],
+                },
+                "smoke": {
+                    "id": "smoke",
+                    "kind": "fluid",
+                    "phase": "smoke",
+                    "size": [1.4, 1.4, 1.6],
+                    "grid_resolution": [14, 14, 16],
+                    "transform": {"position": [0.0, 0.0, 0.8]},
+                    "emitters": [
+                        {
+                            "position": [0.0, -0.45, 0.8],
+                            "size": [0.35, 0.2, 0.35],
+                            "start_time": 0.0,
+                            "end_time": 1.5,
+                            "density": 1.0,
+                            "velocity": [0.0, 0.25, 0.0],
+                        }
+                    ],
+                },
+            },
+            "settings": {
+                "duration": 3.0,
+                "fps": 20,
+                "substeps": 4,
+                "cloth": {"method": "vbd", "iterations": 20, "strain_limit_iterations": 20},
+                "coupling": {"smoke_drag_density": 1.225, "smoke_drag_coefficient": 0.02},
+            },
+            "render": {
+                "ground": False,
+                "camera": {"position": [2.0, -3.0, 1.8], "target": [0.0, 0.0, 0.9]},
             },
         },
     }

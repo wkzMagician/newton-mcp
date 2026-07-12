@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Strongly typed MCP wire models for Newton scene schema version 2."""
+"""Strongly typed MCP wire models for Newton scene schema version 3."""
 
 from __future__ import annotations
 
@@ -456,6 +456,50 @@ class LightDTO(DTOBase):
     intensity: float = Field(3.0, ge=0.0)
 
 
+class RigidSolverSettingsDTO(DTOBase):
+    """Rigid-body solver settings."""
+
+    method: Literal["auto", "xpbd", "vbd"] = "auto"
+    iterations: int = Field(10, gt=0)
+    contact_margin: float = Field(1.0e-3, ge=0.0)
+    contact_compliance: float = Field(0.0, ge=0.0)
+
+
+class ClothSolverSettingsDTO(DTOBase):
+    """Cloth solver settings."""
+
+    method: Literal["auto", "xpbd", "vbd"] = "auto"
+    iterations: int = Field(10, gt=0)
+    strain_limit_iterations: int = Field(3, ge=0)
+    enable_self_collision: bool = False
+
+
+class FluidSolverSettingsDTO(DTOBase):
+    """Fluid solver settings."""
+
+    liquid_method: Literal["apic"] = "apic"
+    smoke_method: Literal["mac"] = "mac"
+    pressure_iterations: int = Field(40, gt=0)
+    cfl_number: float = Field(0.5, gt=0.0)
+
+
+class CouplingSettingsDTO(DTOBase):
+    """Multiphysics coupling settings."""
+
+    mode: Literal["loose", "strong"] = "loose"
+    iterations: int = Field(1, gt=0, le=4)
+    relaxation: float = Field(0.7, gt=0.0, le=1.0)
+    interface_tolerance: float = Field(1.0e-3, gt=0.0)
+    rigid_cloth: bool = True
+    rigid_fluid: bool = True
+    cloth_fluid: bool = True
+    boundary_friction: float = Field(0.0, ge=0.0)
+    cloth_fluid_drag: float = Field(1.0, ge=0.0)
+    cloth_permeability: float = Field(0.0, ge=0.0, le=1.0)
+    smoke_drag_density: float = Field(1.225, gt=0.0)
+    smoke_drag_coefficient: float = Field(0.0, ge=0.0)
+
+
 class SimulationSettingsDTO(DTOBase):
     """Simulation settings."""
 
@@ -463,8 +507,11 @@ class SimulationSettingsDTO(DTOBase):
     substeps: int = Field(8, gt=0)
     duration: float = Field(5.0, gt=0.0, description="Animation duration [s].")
     gravity: Vec3 = Field((0.0, 0.0, -9.81), description="Gravity acceleration [m/s^2].")
-    solver: Literal["auto", "xpbd", "vbd", "smoke", "apic"] = "auto"
     max_particles: int = Field(250_000, gt=0)
+    rigid: RigidSolverSettingsDTO = Field(default_factory=RigidSolverSettingsDTO)
+    cloth: ClothSolverSettingsDTO = Field(default_factory=ClothSolverSettingsDTO)
+    fluid: FluidSolverSettingsDTO = Field(default_factory=FluidSolverSettingsDTO)
+    coupling: CouplingSettingsDTO = Field(default_factory=CouplingSettingsDTO)
 
 
 class RenderSettingsDTO(DTOBase):
@@ -485,8 +532,11 @@ class SimulationSettingsPatchDTO(DTOBase):
     substeps: int | None = Field(None, gt=0)
     duration: float | None = Field(None, gt=0.0)
     gravity: Vec3 | None = None
-    solver: Literal["auto", "xpbd", "vbd", "smoke", "apic"] | None = None
     max_particles: int | None = Field(None, gt=0)
+    rigid: RigidSolverSettingsDTO | None = None
+    cloth: ClothSolverSettingsDTO | None = None
+    fluid: FluidSolverSettingsDTO | None = None
+    coupling: CouplingSettingsDTO | None = None
 
 
 class RenderSettingsPatchDTO(DTOBase):
@@ -501,7 +551,7 @@ class RenderSettingsPatchDTO(DTOBase):
 
 
 class SceneDTO(DTOBase):
-    """Complete Newton scene IR schema version 2."""
+    """Complete Newton scene IR schema version 3."""
 
     name: str = Field(min_length=1)
     objects: dict[str, ObjectSpecDTO] = Field(default_factory=dict)
@@ -511,7 +561,7 @@ class SceneDTO(DTOBase):
     settings: SimulationSettingsDTO = Field(default_factory=SimulationSettingsDTO)
     render: RenderSettingsDTO = Field(default_factory=RenderSettingsDTO)
     metadata: dict[str, JsonValue] = Field(default_factory=dict)
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
 
 
 class ScenePatchDTO(DTOBase):
@@ -524,3 +574,62 @@ class ScenePatchDTO(DTOBase):
     settings: SimulationSettingsPatchDTO | None = None
     render: RenderSettingsPatchDTO | None = None
     metadata: dict[str, JsonValue] | None = None
+
+
+class ParameterSpecDTO(DTOBase):
+    """One registered optimization parameter."""
+
+    name: str = Field(min_length=1)
+    path: str = Field(min_length=1)
+    scope: Literal["scene", "material", "solver", "coupling"]
+    kind: Literal["float", "int", "categorical", "bool"]
+    lower: float | int | None = None
+    upper: float | int | None = None
+    choices: tuple[str | int | float | bool | None, ...] | None = None
+    transform: Literal["linear", "log", "logit"] = "linear"
+    stage: Literal["global", "refine"] = "global"
+    enabled: bool = True
+
+
+class FidelitySettingsDTO(DTOBase):
+    """Framework-controlled F0-F3 fidelity settings."""
+
+    short_duration_fraction: float = Field(0.25, gt=0.0, le=1.0)
+    low_resolution_scale: float = Field(0.5, gt=0.0, le=1.0)
+    render_top_k: int = Field(3, ge=0)
+
+
+class OptimizationPlanDTO(DTOBase):
+    """Optimization plan stored separately from scene IR."""
+
+    name: str = Field(min_length=1)
+    optimizer: Literal["random", "tpe", "cmaes"] = "tpe"
+    parameters: tuple[ParameterSpecDTO, ...] = ()
+    seed: int = 0
+    trials: int = Field(50, gt=0)
+    timeout_sec: float | None = Field(None, gt=0.0)
+    max_wall_time_sec: float | None = Field(None, gt=0.0)
+    study_name: str | None = None
+    storage_url: str | None = None
+    fidelity: FidelitySettingsDTO = Field(default_factory=FidelitySettingsDTO)
+    robustness_top_k: int = Field(3, ge=0, le=5)
+    robustness_samples: int = Field(3, ge=0)
+    robustness_beta: float = Field(1.0, ge=0.0)
+    acceptable_objective: float = Field(100.0, ge=0.0)
+
+
+class TaskMetricSpecDTO(DTOBase):
+    """One numeric simulation-result path used as a task loss."""
+
+    name: str = Field(min_length=1)
+    path: str = Field(min_length=1)
+    target: float
+    tolerance: float = Field(1.0, gt=0.0)
+    mode: Literal["target", "minimum", "maximum"] = "target"
+
+
+class TaskSpecDTO(DTOBase):
+    """Agent-authored task semantics stored outside scene IR."""
+
+    name: str = Field(min_length=1)
+    metrics: tuple[TaskMetricSpecDTO, ...] = ()

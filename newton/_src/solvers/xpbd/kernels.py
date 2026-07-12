@@ -2070,6 +2070,8 @@ def solve_body_contact_positions(
     # outputs
     deltas: wp.array(dtype=wp.spatial_vector),
     contact_inv_weight: wp.array(dtype=float),
+    contact_normal_impulse: wp.array(dtype=float),
+    contact_tangential_impulse: wp.array(dtype=float),
 ):
     tid = wp.tid()
 
@@ -2175,6 +2177,7 @@ def solve_body_contact_positions(
     lambda_n = compute_contact_constraint_delta(
         d, X_wb_a, X_wb_b, m_inv_a, m_inv_b, I_inv_a, I_inv_b, -n, n, angular_a, angular_b, relaxation, dt
     )
+    wp.atomic_add(contact_normal_impulse, tid, wp.abs(lambda_n))
 
     lin_delta_a = -n * lambda_n
     lin_delta_b = n * lambda_n
@@ -2221,6 +2224,7 @@ def solve_body_contact_positions(
 
             # limit friction based on incremental normal force, good approximation to limiting on total force
             lambda_fr = wp.max(lambda_fr, -lambda_n * mu)
+            wp.atomic_add(contact_tangential_impulse, tid, wp.abs(lambda_fr))
 
             lin_delta_a -= perp * lambda_fr
             lin_delta_b += perp * lambda_fr
@@ -2327,6 +2331,7 @@ def apply_rigid_restitution(
     dt: float,
     # outputs
     deltas: wp.array(dtype=wp.spatial_vector),
+    contact_normal_impulse: wp.array(dtype=float),
 ):
     tid = wp.tid()
 
@@ -2443,6 +2448,7 @@ def apply_rigid_restitution(
 
     # Eq. 34
     dv = (-rel_vel_new - restitution * rel_vel_old) / inv_mass
+    wp.atomic_add(contact_normal_impulse, tid, wp.abs(dv))
 
     # Eq. 33
     if body_a >= 0:

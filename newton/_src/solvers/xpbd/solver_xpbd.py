@@ -100,6 +100,9 @@ class SolverXPBD(SolverBase):
         self._particle_delta_counter = 0
         self._body_delta_counter = 0
 
+        self.rigid_contact_normal_impulse = wp.zeros(model.rigid_contact_max, dtype=float, device=model.device)
+        self.rigid_contact_tangential_impulse = wp.zeros(model.rigid_contact_max, dtype=float, device=model.device)
+
         if model.particle_count > 1 and model.particle_grid is not None:
             # reserve space for the particle hash grid
             with wp.ScopedDevice(model.device):
@@ -226,6 +229,8 @@ class SolverXPBD(SolverBase):
         body_deltas = None
 
         rigid_contact_inv_weight = None
+        self.rigid_contact_normal_impulse.zero_()
+        self.rigid_contact_tangential_impulse.zero_()
 
         if contacts:
             if self.rigid_contact_con_weighting:
@@ -549,6 +554,8 @@ class SolverXPBD(SolverBase):
                             outputs=[
                                 body_deltas,
                                 rigid_contact_inv_weight,
+                                self.rigid_contact_normal_impulse,
+                                self.rigid_contact_tangential_impulse,
                             ],
                             device=model.device,
                         )
@@ -665,6 +672,7 @@ class SolverXPBD(SolverBase):
                         ],
                         outputs=[
                             body_deltas,
+                            self.rigid_contact_normal_impulse,
                         ],
                         device=model.device,
                     )

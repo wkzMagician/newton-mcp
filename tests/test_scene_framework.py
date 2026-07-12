@@ -157,7 +157,7 @@ class TestSceneFramework(unittest.TestCase):
             }
         )
         ball = scene.objects["ball"]
-        self.assertEqual(scene.schema_version, 2)
+        self.assertEqual(scene.schema_version, 3)
         self.assertEqual(ball.motion, "static")
         self.assertEqual(ball.physical_material.friction_static, 0.2)
         self.assertEqual(ball.visual_material.color, [1.0, 0.0, 0.0, 1.0])
@@ -181,7 +181,9 @@ class TestSceneFramework(unittest.TestCase):
         )
         report = validate_scene(scene)
         self.assertFalse(report["valid"])
-        self.assertEqual({item["code"] for item in report["diagnostics"]}, {"solver_mismatch", "particle_budget"})
+        codes = {item["code"] for item in report["diagnostics"]}
+        self.assertIn("particle_budget", codes)
+        self.assertNotIn("solver_mismatch", codes)
         self.assertEqual(report["pipeline"], ["apic"])
 
     def test_transactional_patch_preview_and_program_export(self):
@@ -383,11 +385,15 @@ class TestSceneFramework(unittest.TestCase):
                 "settings": {"duration": 1.0, "fps": 30, "substeps": 4},
             }
         )
-        result = SceneExecutorLocal().simulate(scene)
+        result = SceneExecutorLocal().simulate(scene, capture_cache=True)
         final_height = result["trajectories"]["ball"][-1][2]
         self.assertGreater(result["metrics"]["contacts"], 0)
         self.assertGreater(final_height, 0.45)
         self.assertLess(final_height, 0.7)
+        impulses = [
+            contact["normal_impulse"] for record in result["telemetry_records"] for contact in record["contacts"]
+        ]
+        self.assertGreater(max(impulses, default=0.0), 0.0)
 
     def test_smoke_emitters_create_finite_projected_density(self):
         scene = Scene.from_dict(
@@ -421,6 +427,50 @@ class TestSceneFramework(unittest.TestCase):
         self.assertGreater(stats["density_mass"], 0.0)
         self.assertGreater(stats["occupied_cells"], 0)
 
+    def test_smoke_drag_returns_balanced_impulse_to_rigid_body(self):
+        scene = Scene.from_dict(
+            {
+                "name": "smoke-rigid-drag",
+                "schema_version": 3,
+                "objects": {
+                    "block": {
+                        "id": "block",
+                        "kind": "rigid",
+                        "shape": "box",
+                        "size": [0.3, 0.3, 0.3],
+                    },
+                    "smoke": {
+                        "id": "smoke",
+                        "kind": "fluid",
+                        "phase": "smoke",
+                        "size": [1.0, 1.0, 1.0],
+                        "grid_resolution": [8, 8, 8],
+                        "emitters": [
+                            {
+                                "position": [0.0, -0.2, 0.0],
+                                "size": [0.3, 0.2, 0.3],
+                                "start_time": 0.0,
+                                "end_time": 1.0,
+                                "velocity": [0.0, 2.0, 0.0],
+                            }
+                        ],
+                    },
+                },
+                "settings": {
+                    "duration": 0.1,
+                    "fps": 10,
+                    "substeps": 1,
+                    "gravity": [0.0, 0.0, 0.0],
+                    "coupling": {"smoke_drag_coefficient": 1.0},
+                },
+                "render": {"ground": False},
+            }
+        )
+        result = SceneExecutorLocal().simulate(scene, frames=1, capture_cache=True)
+        exchanges = result["telemetry_records"][0]["coupling_exchanges"]
+        self.assertEqual([item["pair_type"] for item in exchanges], ["rigid-fluid"])
+        self.assertLessEqual(exchanges[0]["impulse_balance_error"], 1.0e-8)
+
     def test_apic_particle_pool_projects_and_remains_finite(self):
         scene = Scene.from_dict(
             {
@@ -436,7 +486,7 @@ class TestSceneFramework(unittest.TestCase):
                         "particle_spacing": 0.1,
                     }
                 },
-                "settings": {"duration": 0.05, "fps": 20, "substeps": 1, "max_particles": 1000},
+                "settings": {"duration": 0.05, "fps": 20, "substeps": 1, "max_particles": 3000},
             }
         )
         stats = SceneExecutorLocal().simulate(scene)["metrics"]["fluid"]["water"]
@@ -469,7 +519,7 @@ class TestSceneFramework(unittest.TestCase):
                         "particle_spacing": 0.15,
                     },
                 },
-                "settings": {"duration": 0.1, "fps": 20, "substeps": 1, "max_particles": 1000},
+                "settings": {"duration": 0.1, "fps": 20, "substeps": 1, "max_particles": 5000},
                 "render": {"ground": False},
             }
         )
@@ -500,7 +550,7 @@ class TestSceneFramework(unittest.TestCase):
                         "particle_spacing": 0.15,
                     },
                 },
-                "settings": {"max_particles": 1000},
+                "settings": {"max_particles": 9000},
                 "render": {"ground": False},
             }
         )
@@ -584,6 +634,27 @@ class TestSceneFramework(unittest.TestCase):
         self.assertEqual(direct["scene_hash"], exported["scene_hash"])
         self.assertEqual(direct["metrics"]["first_contact_time"], exported["metrics"]["first_contact_time"])
         self.assertTrue(np.allclose(direct["trajectories"]["ball"], exported["trajectories"]["ball"]))
+
+    def test_repeated_execution_has_deterministic_trajectory_hash(self):
+        scene = Scene.from_dict(
+            {
+                "name": "deterministic",
+                "schema_version": 3,
+                "objects": {
+                    "ball": {
+                        "id": "ball",
+                        "kind": "rigid",
+                        "shape": "sphere",
+                        "size": [0.2, 0.2, 0.2],
+                        "transform": {"position": [0.0, 0.0, 1.0]},
+                    }
+                },
+                "settings": {"duration": 0.1, "fps": 10, "substeps": 1},
+            }
+        )
+        first = SceneExecutorLocal().simulate(scene)
+        second = SceneExecutorLocal().simulate(scene)
+        self.assertEqual(first["trajectory_hash"], second["trajectory_hash"])
 
     def test_triangle_contact_covers_sphere_box_and_plane(self):
         triangle = np.array([[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]])

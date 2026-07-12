@@ -291,8 +291,12 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--case", choices=sorted(AGENT_PROMPTS), action="append", dest="cases")
     parser.add_argument("--run-dir", type=Path, help="New directory that will contain this evaluation run")
-    parser.add_argument("--model", default="gpt-5.6-terra", help="Optional Codex model override (default: gpt-5.6-terra)")
-    parser.add_argument("--reasoning", default="low", help="Optional reasoning effort (e.g. low, medium, high; default: low)")
+    parser.add_argument(
+        "--model", default="gpt-5.6-terra", help="Optional Codex model override (default: gpt-5.6-terra)"
+    )
+    parser.add_argument(
+        "--reasoning", default="low", help="Optional reasoning effort (e.g. low, medium, high; default: low)"
+    )
     parser.add_argument("--timeout", type=float, default=1200.0, help="Timeout per case in seconds")
     parser.add_argument("--auth-file", type=Path, default=Path.home() / ".codex" / "auth.json")
     parser.add_argument("--no-auth-copy", action="store_true", help="Use OPENAI_API_KEY instead of copying auth.json")

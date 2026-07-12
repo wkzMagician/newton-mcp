@@ -12,7 +12,7 @@ Vec2: TypeAlias = tuple[float, float]
 Vec3: TypeAlias = tuple[float, float, float]
 Quat: TypeAlias = tuple[float, float, float, float]
 Color: TypeAlias = tuple[float, float, float, float]
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 @dataclass(slots=True)
@@ -325,21 +325,91 @@ class RenderSettings:
 
 
 @dataclass(slots=True)
+class RigidSolverSettings:
+    """Rigid-body solver settings."""
+
+    method: Literal["auto", "xpbd", "vbd"] = "auto"
+    iterations: int = 10
+    contact_margin: float = 1.0e-3
+    contact_compliance: float = 0.0
+
+
+@dataclass(slots=True)
+class ClothSolverSettings:
+    """Cloth solver settings."""
+
+    method: Literal["auto", "xpbd", "vbd"] = "auto"
+    iterations: int = 10
+    strain_limit_iterations: int = 3
+    enable_self_collision: bool = False
+
+
+@dataclass(slots=True)
+class FluidSolverSettings:
+    """Grid and particle fluid solver settings."""
+
+    liquid_method: Literal["apic"] = "apic"
+    smoke_method: Literal["mac"] = "mac"
+    pressure_iterations: int = 40
+    cfl_number: float = 0.5
+
+
+@dataclass(slots=True)
+class CouplingSettings:
+    """Settings shared by multiphysics interface solvers."""
+
+    mode: Literal["loose", "strong"] = "loose"
+    iterations: int = 1
+    relaxation: float = 0.7
+    interface_tolerance: float = 1.0e-3
+    rigid_cloth: bool = True
+    rigid_fluid: bool = True
+    cloth_fluid: bool = True
+    boundary_friction: float = 0.0
+    cloth_fluid_drag: float = 1.0
+    cloth_permeability: float = 0.0
+    smoke_drag_density: float = 1.225
+    smoke_drag_coefficient: float = 0.0
+
+
+@dataclass(slots=True)
 class SimulationSettings:
-    """Scene simulation settings; all values use SI units."""
+    """Scene simulation settings; all physical values use SI units."""
 
     fps: int = 60
     substeps: int = 8
     duration: float = 5.0
     gravity: Vec3 = (0.0, 0.0, -9.81)
-    solver: Literal["auto", "xpbd", "vbd", "smoke", "apic"] = "auto"
-    solver_iterations: int = 10
     max_particles: int = 250_000
+    rigid: RigidSolverSettings = field(default_factory=RigidSolverSettings)
+    cloth: ClothSolverSettings = field(default_factory=ClothSolverSettings)
+    fluid: FluidSolverSettings = field(default_factory=FluidSolverSettings)
+    coupling: CouplingSettings = field(default_factory=CouplingSettings)
+
+    @property
+    def solver(self) -> Literal["auto", "xpbd", "vbd"]:
+        """Return the legacy solid-solver selection."""
+        return self.rigid.method
+
+    @solver.setter
+    def solver(self, value: Literal["auto", "xpbd", "vbd"]) -> None:
+        self.rigid.method = value
+        self.cloth.method = value
+
+    @property
+    def solver_iterations(self) -> int:
+        """Return the legacy shared solid-solver iteration count."""
+        return self.rigid.iterations
+
+    @solver_iterations.setter
+    def solver_iterations(self, value: int) -> None:
+        self.rigid.iterations = value
+        self.cloth.iterations = value
 
 
 @dataclass(slots=True)
 class Scene:
-    """Backend-neutral animation scene schema version 2."""
+    """Backend-neutral animation scene schema version 3."""
 
     name: str
     objects: dict[str, SceneObject] = field(default_factory=dict)
@@ -365,24 +435,24 @@ class Scene:
             constraints={key: _constraint_from_dict(item) for key, item in values.get("constraints", {}).items()},
             fields={key: _field_from_dict(item) for key, item in values.get("fields", {}).items()},
             actions={key: _action_from_dict(item) for key, item in values.get("actions", {}).items()},
-            settings=SimulationSettings(**values.get("settings", {})),
+            settings=_simulation_settings_from_dict(values.get("settings", {})),
             render=_render_from_dict(values.get("render", {})),
             metadata=values.get("metadata", {}),
         )
 
 
 def migrate_scene_dict(data: dict[str, Any]) -> dict[str, Any]:
-    """Return a schema-v2 copy of a v1 or v2 scene mapping."""
+    """Return a schema-v3 copy of a v1, v2, or v3 scene mapping."""
     version = data.get("schema_version", 1)
     if version == SCHEMA_VERSION:
         return dict(data)
-    if version != 1:
+    if version not in {1, 2}:
         raise ValueError(f"Unsupported scene schema version: {version}")
     migrated = dict(data)
     objects = {}
     for key, original in data.get("objects", {}).items():
         item = dict(original)
-        material = item.pop("material", {})
+        material = item.pop("material", {}) if version == 1 else {}
         if material:
             friction = material.get("friction", 0.5)
             item["physical_material"] = {
@@ -392,18 +462,43 @@ def migrate_scene_dict(data: dict[str, Any]) -> dict[str, Any]:
                 "restitution": material.get("restitution", 0.0),
             }
             item["visual_material"] = {"color": material.get("color", (0.7, 0.7, 0.7, 1.0))}
-        if "dynamic" in item:
+        if version == 1 and "dynamic" in item:
             item["motion"] = "dynamic" if item.pop("dynamic") else "static"
-        if item.get("kind") == "fluid":
+        if version == 1 and item.get("kind") == "fluid":
             item.setdefault("phase", "liquid")
         objects[key] = item
     settings = dict(data.get("settings", {}))
-    if settings.get("solver") == "mpm":
-        settings["solver"] = "apic"
+    legacy_solver = settings.pop("solver", "auto")
+    legacy_iterations = settings.pop("solver_iterations", 10)
+    if legacy_solver == "mpm":
+        legacy_solver = "apic"
+    solid_method = legacy_solver if legacy_solver in {"auto", "xpbd", "vbd"} else "auto"
+    rigid = dict(settings.get("rigid", {}))
+    rigid.setdefault("method", solid_method)
+    rigid.setdefault("iterations", legacy_iterations)
+    cloth = dict(settings.get("cloth", {}))
+    cloth.setdefault("method", solid_method)
+    cloth.setdefault("iterations", legacy_iterations)
+    # The v3 rigid-cloth solver applies true bidirectional interface impulses;
+    # two extra safety projections preserve v2 cloth-folding quality during migration.
+    cloth.setdefault("strain_limit_iterations", 5)
+    settings["rigid"] = rigid
+    settings["cloth"] = cloth
+    settings.setdefault("fluid", {})
+    settings.setdefault("coupling", {})
     migrated.update(objects=objects, settings=settings, schema_version=SCHEMA_VERSION)
     migrated.setdefault("actions", {})
     migrated.setdefault("render", {})
     return migrated
+
+
+def _simulation_settings_from_dict(data: dict[str, Any]) -> SimulationSettings:
+    values = dict(data)
+    values["rigid"] = RigidSolverSettings(**values.get("rigid", {}))
+    values["cloth"] = ClothSolverSettings(**values.get("cloth", {}))
+    values["fluid"] = FluidSolverSettings(**values.get("fluid", {}))
+    values["coupling"] = CouplingSettings(**values.get("coupling", {}))
+    return SimulationSettings(**values)
 
 
 def _object_from_dict(data: dict[str, Any]) -> SceneObject:

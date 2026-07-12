@@ -77,6 +77,7 @@ docs/_static/viser/
 # Prompt-to-video evaluation outputs and isolated agent workspaces
 /evaluation/results/
 /evaluation/workspaces/
+/evaluation/baselines/*
 
 # Local browser testing and web-scraping artifacts
 /.firecrawl/

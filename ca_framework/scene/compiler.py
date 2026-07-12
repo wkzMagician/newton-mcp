@@ -49,6 +49,7 @@ class CompiledScene:
     body_indices: dict[str, int]
     shape_indices: dict[str, list[int]]
     initial_shape_scales: np.ndarray
+    initial_particle_q: np.ndarray
     fluid_solvers: dict[str, Any]
 
 
@@ -99,7 +100,7 @@ class SceneCompilerNewton:
             shape_indices,
             initial_shape_scales,
             fluid_solvers,
-        ) = self._compile_newton(scene, containers, pinned)
+        ) = self._compile_newton(scene, containers, pinned, cloth_indices)
         return CompiledScene(
             scene=scene,
             pipeline=select_pipeline(scene),
@@ -115,6 +116,11 @@ class SceneCompilerNewton:
             body_indices=body_indices,
             shape_indices=shape_indices,
             initial_shape_scales=initial_shape_scales,
+            initial_particle_q=(
+                state_0.particle_q.numpy().copy()
+                if state_0.particle_q is not None
+                else np.empty((0, 3), dtype=np.float32)
+            ),
             fluid_solvers=fluid_solvers,
         )
 
@@ -123,6 +129,7 @@ class SceneCompilerNewton:
         scene: Scene,
         containers: dict[str, list[dict[str, Any]]],
         pinned: dict[str, list[int]],
+        cloth_indices: dict[str, list[int]],
     ) -> tuple[Any, Any, Any, Any, Any, Any, dict[str, int], dict[str, list[int]], np.ndarray, dict[str, Any]]:
         """Build the concrete Newton objects required by the frame runtime."""
         builder = newton.ModelBuilder(up_axis="Z")
@@ -248,10 +255,12 @@ class SceneCompilerNewton:
         control = model.control()
         contacts = model.contacts()
         if pipeline[0] == "vbd":
-            solver = newton.solvers.SolverVBD(model, iterations=scene.settings.solver_iterations)
+            solver = newton.solvers.SolverVBD(model, iterations=scene.settings.cloth.iterations)
         else:
             solver = newton.solvers.SolverXPBD(
-                model, iterations=scene.settings.solver_iterations, enable_restitution=True
+                model,
+                iterations=max(scene.settings.rigid.iterations, scene.settings.cloth.iterations),
+                enable_restitution=True,
             )
         fluid_solvers = {}
         for item in scene.objects.values():
@@ -297,7 +306,14 @@ class SceneCompilerNewton:
                     domain_min=domain_min,
                     buoyancy=item.buoyancy,
                     dissipation=item.dissipation,
+                    pressure_iters=scene.settings.fluid.pressure_iterations,
                     emitters=emitters,
+                    drag_density=scene.settings.coupling.smoke_drag_density,
+                    drag_coefficient=scene.settings.coupling.smoke_drag_coefficient,
+                    coupling_iterations=(
+                        scene.settings.coupling.iterations if scene.settings.coupling.mode == "strong" else 1
+                    ),
+                    coupling_relaxation=scene.settings.coupling.relaxation,
                 )
                 boundary_type = newton.solvers.SolverFluidSmoke.Boundary
                 for obstacle in scene.objects.values():
@@ -310,6 +326,24 @@ class SceneCompilerNewton:
                                 ),
                                 body=body_indices.get(obstacle.id),
                             )
+                        )
+                if scene.settings.coupling.cloth_fluid:
+                    cloth_boundary_type = newton.solvers.SolverFluidSmoke.ClothBoundary
+                    for cloth in (value for value in scene.objects.values() if isinstance(value, ObjectCloth)):
+                        indices = cloth_indices[cloth.id]
+                        width, height = cloth.resolution
+                        triangles = []
+                        for y in range(height - 1):
+                            for x in range(width - 1):
+                                lower = indices[y * width + x]
+                                triangles.extend(
+                                    (
+                                        (lower, lower + 1, lower + width + 1),
+                                        (lower, lower + width + 1, lower + width),
+                                    )
+                                )
+                        smoke_solver.add_cloth_boundary(
+                            cloth_boundary_type(cloth.id, np.asarray(triangles, dtype=np.int32))
                         )
                 fluid_solvers[item.id] = smoke_solver
             else:
@@ -376,6 +410,15 @@ class SceneCompilerNewton:
                     density=item.density,
                     viscosity=item.viscosity,
                     surface_tension=item.surface_tension,
+                    pressure_iters=scene.settings.fluid.pressure_iterations,
+                    coupling_iterations=(
+                        scene.settings.coupling.iterations if scene.settings.coupling.mode == "strong" else 1
+                    ),
+                    coupling_relaxation=scene.settings.coupling.relaxation,
+                    cfl_number=scene.settings.fluid.cfl_number,
+                    cloth_drag=scene.settings.coupling.cloth_fluid_drag,
+                    cloth_permeability=scene.settings.coupling.cloth_permeability,
+                    boundary_friction=scene.settings.coupling.boundary_friction,
                 )
                 volume_size = tuple(item.size[axis] * item.transform.scale[axis] for axis in range(3))
                 minimum = tuple(item.transform.position[axis] - volume_size[axis] * 0.5 for axis in range(3))
@@ -427,6 +470,27 @@ class SceneCompilerNewton:
                                 local_position=local_wall["position"],
                             )
                         )
+                cloth_boundary_type = newton.solvers.SolverFluidAPIC.ClothBoundary
+                for cloth in (
+                    value
+                    for value in scene.objects.values()
+                    if isinstance(value, ObjectCloth) and scene.settings.coupling.cloth_fluid
+                ):
+                    indices = cloth_indices[cloth.id]
+                    width, height = cloth.resolution
+                    triangles = []
+                    for y in range(height - 1):
+                        for x in range(width - 1):
+                            lower = indices[y * width + x]
+                            triangles.extend(
+                                (
+                                    (lower, lower + 1, lower + width + 1),
+                                    (lower, lower + width + 1, lower + width),
+                                )
+                            )
+                    liquid_solver.add_cloth_boundary(
+                        cloth_boundary_type(cloth.id, np.asarray(triangles, dtype=np.int32))
+                    )
                 fluid_solvers[item.id] = liquid_solver
         return (
             model,

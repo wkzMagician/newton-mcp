@@ -115,7 +115,7 @@ def estimate_resources(scene: Scene) -> dict[str, int]:
         "liquid_grid_cells": liquid_grid_cells,
         "simulation_frames": simulation_frames,
         "simulation_steps": simulation_steps,
-        "solver_work": simulation_steps * scene.settings.solver_iterations,
+        "solver_work": simulation_steps * max(scene.settings.rigid.iterations, scene.settings.cloth.iterations),
         "max_cloth_vertices": max(cloth_counts, default=0),
         "total_cloth_vertices": sum(cloth_counts),
         "liquid_capacity": scene.settings.max_particles if has_liquid else 0,
@@ -357,22 +357,40 @@ def validate_scene(scene: Scene, *, allow_over_budget: bool | None = None) -> di
                         "Raise or resize the initial fluid volume.",
                     )
 
-    expected = {"smoke": "smoke", "liquid": "apic"}
-    if scene.settings.solver != "auto":
-        for phase in fluid_phases:
-            if scene.settings.solver != expected[phase]:
-                error(
-                    "settings.solver",
-                    "solver_mismatch",
-                    f"{phase} requires the {expected[phase]} solver.",
-                    "Use solver='auto' or the matching fluid solver.",
-                )
-    if len(fluid_phases) > 1 and scene.settings.solver != "auto":
+    if scene.settings.rigid.iterations <= 0 or scene.settings.cloth.iterations <= 0:
         error(
-            "settings.solver",
-            "mixed_fluid_solver",
-            "Mixed smoke and liquid scenes require automatic routing.",
-            "Use solver='auto'.",
+            "settings",
+            "invalid_solver_iterations",
+            "Solid solver iteration counts must be positive.",
+            "Use at least one rigid and cloth solver iteration.",
+        )
+    if scene.settings.fluid.pressure_iterations <= 0 or scene.settings.fluid.cfl_number <= 0.0:
+        error(
+            "settings.fluid",
+            "invalid_fluid_settings",
+            "Pressure iterations and CFL number must be positive.",
+            "Use a positive pressure iteration count and CFL number.",
+        )
+    coupling = scene.settings.coupling
+    if coupling.iterations <= 0 or not 0.0 < coupling.relaxation <= 1.0 or coupling.interface_tolerance <= 0.0:
+        error(
+            "settings.coupling",
+            "invalid_coupling_settings",
+            "Coupling iterations and tolerance must be positive and relaxation must be in (0, 1].",
+            "Use positive iterations/tolerance and a relaxation no greater than one.",
+        )
+    if (
+        coupling.boundary_friction < 0.0
+        or coupling.cloth_fluid_drag < 0.0
+        or not 0.0 <= coupling.cloth_permeability <= 1.0
+        or coupling.smoke_drag_density <= 0.0
+        or coupling.smoke_drag_coefficient < 0.0
+    ):
+        error(
+            "settings.coupling",
+            "invalid_coupling_material",
+            "Coupling material coefficients are outside their valid ranges.",
+            "Use non-negative friction/drag, positive smoke density, and permeability in [0, 1].",
         )
 
     resources = estimate_resources(scene)
@@ -488,7 +506,8 @@ def select_pipeline(scene: Scene) -> list[str]:
     cloth = [item for item in scene.objects.values() if isinstance(item, ObjectCloth)]
     if any(not isinstance(item, ObjectFluid) for item in scene.objects.values()):
         rigid_solver = "vbd" if any(item.self_collision for item in cloth) else "xpbd"
-        pipeline.append(rigid_solver if scene.settings.solver in {"auto", "smoke", "apic"} else scene.settings.solver)
+        configured = scene.settings.cloth.method if cloth else scene.settings.rigid.method
+        pipeline.append(rigid_solver if configured == "auto" else configured)
     phases = {item.phase for item in scene.objects.values() if isinstance(item, ObjectFluid)}
     if "smoke" in phases:
         pipeline.append("smoke")

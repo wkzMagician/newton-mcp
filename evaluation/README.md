@@ -26,11 +26,28 @@ export WARP_CACHE_ROOT=/tmp/newton-warp-cache-$$
 uv run --extra dev -m unittest evaluation.tests.test_canonical_scenes
 ```
 
-Run all ten reference scenes and write complete bundles beneath the ignored
+Run all twelve reference scenes and write complete bundles beneath the ignored
 `evaluation/results/canonical/` directory:
 
 ```bash
 uv run -m evaluation.run_canonical
+```
+
+Freeze deterministic schema-v3 baseline evidence (scene, metrics,
+diagnostics, trajectory hash, device, Warp version, seed, and wall time):
+
+```bash
+uv run -m evaluation.freeze_baseline evaluation/baselines/schema_v3
+```
+
+Compare frozen pre-refactor and migrated post-refactor evidence using the
+explicit penetration, cloth-quality, mass, and divergence tolerances:
+
+```bash
+uv run -m evaluation.compare_baselines \
+  evaluation/baselines/schema_v2 \
+  evaluation/baselines/schema_v3_migrated_v2 \
+  --output evaluation/baselines/comparison.json
 ```
 
 Run one scene:

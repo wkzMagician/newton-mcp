@@ -13,6 +13,7 @@ from typing import Any, Literal
 from mcp.server.fastmcp import FastMCP
 
 from ca_framework.mcp import SceneTools
+from ca_framework.mcp.optimization_tools import OptimizationTools
 from ca_framework.scene import SceneExecutorLocal, SceneStore
 
 from .dto import (
@@ -25,8 +26,10 @@ from .dto import (
     FieldSpecDTO,
     ObjectPatchDTO,
     ObjectSpecDTO,
+    OptimizationPlanDTO,
     SceneDTO,
     ScenePatchDTO,
+    TaskSpecDTO,
 )
 
 mcp = FastMCP(
@@ -40,6 +43,12 @@ mcp = FastMCP(
 def _tools() -> SceneTools:
     workspace = os.environ.get("CA_SCENE_WORKSPACE", ".ca-scenes")
     return SceneTools(SceneStore(workspace), SceneExecutorLocal())
+
+
+@lru_cache(maxsize=1)
+def _optimization_tools() -> OptimizationTools:
+    tools = _tools()
+    return OptimizationTools(tools.store, tools.executor)
 
 
 @mcp.tool()
@@ -186,6 +195,64 @@ def render_scene(scene_name: str, output: str) -> dict[str, Any]:
 def export_scene(scene_name: str, output: str, format: str = "json") -> dict[str, Any]:
     """Export a scene; the initial executor supports JSON."""
     return _tools().export_scene(scene_name, output, format)
+
+
+@mcp.tool()
+def create_optimization_plan(
+    scene_name: str,
+    plan: OptimizationPlanDTO,
+    task_spec: TaskSpecDTO | None = None,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Create an optimization plan outside scene metadata."""
+    return _optimization_tools().create_plan(
+        scene_name,
+        plan.model_dump(),
+        task_spec=task_spec.model_dump() if task_spec is not None else None,
+        overwrite=overwrite,
+    )
+
+
+@mcp.tool()
+def validate_optimization_plan(plan_name: str) -> dict[str, Any]:
+    """Validate parameter paths, ranges, active count, and midpoint scene."""
+    return _optimization_tools().validate_plan(plan_name)
+
+
+@mcp.tool()
+def start_optimization(plan_name: str, output_dir: str | None = None) -> dict[str, Any]:
+    """Start an independent serialized Optuna ask/tell study."""
+    return _optimization_tools().start(plan_name, output_dir)
+
+
+@mcp.tool()
+def get_optimization_job(job_id: str) -> dict[str, Any]:
+    """Poll optimization progress and best trial."""
+    return _optimization_tools().get_job(job_id)
+
+
+@mcp.tool()
+def list_optimization_trials(job_id: str) -> list[dict[str, Any]]:
+    """List available trial results."""
+    return _optimization_tools().list_trials(job_id)
+
+
+@mcp.tool()
+def get_optimization_trial(job_id: str, trial_number: int) -> dict[str, Any]:
+    """Read one trial's parameters, metrics, and artifacts."""
+    return _optimization_tools().get_trial(job_id, trial_number)
+
+
+@mcp.tool()
+def apply_optimization_trial(job_id: str, trial_number: int, scene_name: str) -> dict[str, Any]:
+    """Apply a selected trial to a stored scene."""
+    return _optimization_tools().apply_trial(job_id, trial_number, scene_name)
+
+
+@mcp.tool()
+def compare_optimization_trials(job_id: str, trial_numbers: list[int]) -> list[dict[str, Any]]:
+    """Compare selected trials without modifying a scene."""
+    return _optimization_tools().compare_trials(job_id, trial_numbers)
 
 
 @mcp.tool()

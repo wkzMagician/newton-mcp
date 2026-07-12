@@ -77,6 +77,7 @@ class TestMcpSchema(unittest.TestCase):
             "update_constraint",
             "update_field",
             "update_action",
+            "create_optimization_plan",
         )
         for name in names:
             with self.subTest(name=name):
@@ -102,6 +103,23 @@ class TestMcpSchema(unittest.TestCase):
         self.assertEqual(camera["$ref"], "#/$defs/CameraLookAtDTO")
         properties = schema["$defs"]["CameraLookAtDTO"]["properties"]
         self.assertEqual(set(properties), {"position", "target", "up", "field_of_view"})
+
+    def test_optimization_lifecycle_tools_are_registered(self):
+        expected = {
+            "create_optimization_plan",
+            "validate_optimization_plan",
+            "start_optimization",
+            "get_optimization_job",
+            "list_optimization_trials",
+            "get_optimization_trial",
+            "apply_optimization_trial",
+            "compare_optimization_trials",
+        }
+        self.assertTrue(expected.issubset(self.schemas))
+        plan = self.schemas["create_optimization_plan"]["properties"]["plan"]
+        self.assertEqual(plan["$ref"], "#/$defs/OptimizationPlanDTO")
+        task_spec = self.schemas["create_optimization_plan"]["properties"]["task_spec"]
+        self.assertEqual(task_spec["anyOf"][0]["$ref"], "#/$defs/TaskSpecDTO")
 
     def test_wire_validation_rejects_unknown_fields_and_bad_vectors(self):
         adapter = TypeAdapter(ObjectSpecDTO)

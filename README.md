@@ -14,7 +14,7 @@ The repository also contains a prompt-driven framework for generating animations
 - `knowledge/skills` contains focused simulation knowledge that an agent can load when translating a prompt into a scene.
 
 The runtime and agent-facing files intentionally contain no reference scenes or
-reference answers. The ten canonical acceptance cases, their assertions, and
+reference answers. The twelve canonical acceptance cases, their assertions, and
 benchmark commands live under `evaluation/`; do not expose that directory to an
 agent during a prompt-to-video experiment.
 
@@ -28,6 +28,33 @@ Scene files are stored in `.ca-scenes` by default. Set `CA_SCENE_WORKSPACE` to u
 
 Development tests remain under `tests/`. Evaluation assets and instructions are
 documented separately in `evaluation/README.md`.
+
+### Numerical optimization
+
+Scene optimization is a separate, reproducible workflow: an
+`OptimizationPlan` defines bounded physical parameters, an optional `TaskSpec`
+defines scene-specific losses, and Optuna proposes Random, TPE, or CMA-ES
+trials. Every trial passes through static validation, a short coarse rejection
+run, a full-resolution metric run, and optional finalist rendering. Optimization
+history is never stored in `Scene.metadata`.
+
+The MCP server exposes the complete lifecycle through
+`create_optimization_plan`, `validate_optimization_plan`,
+`start_optimization`, `get_optimization_job`, `list_optimization_trials`,
+`get_optimization_trial`, `compare_optimization_trials`, and
+`apply_optimization_trial`. A stored plan has three independent inputs:
+
+```text
+.ca-scenes/.optimizations/plans/<name>/
+├── scene.json
+├── optimization_plan.json
+└── task_spec.json          # optional
+```
+
+Trial directories contain the applied scene and parameters, constraint-first
+metrics, diagnostics, structured telemetry, and the final report. The report
+selects the best feasible, fastest acceptable, and most robust candidates and
+writes `best_so_far.svg` without requiring a plotting dependency.
 
 ## Installation
 

@@ -21,6 +21,8 @@ from typing import Any
 import numpy as np
 import warp as wp
 
+from ca_framework.coupling import CoupledSimulationScheduler, CouplingExchange
+from ca_framework.metrics import MetricPipeline
 from newton.solvers import SolverNotifyFlags
 
 from .compiler import SceneCompilerNewton
@@ -35,6 +37,15 @@ from .model import (
     ObjectFluid,
     ObjectRigid,
     Scene,
+)
+from .telemetry import (
+    BodyTelemetry,
+    ClothTelemetry,
+    ContactTelemetry,
+    FluidTelemetry,
+    FrameTelemetry,
+    SimulationTelemetry,
+    SolverTelemetry,
 )
 from .validation import estimate_resources, validate_scene
 
@@ -52,6 +63,7 @@ _PHYSICS_FAILURE_CODES = frozenset(
         "particle_capacity_overflow",
         "contact_capacity_overflow",
         "cloth_deformation_failure",
+        "coupling_nonconvergence",
     }
 )
 
@@ -148,15 +160,26 @@ class SceneExecutorLocal:
         fired_impulses: set[str] = set()
         state_frames: list[dict[str, np.ndarray]] = []
         contact_records: list[dict[str, Any]] = []
+        telemetry = SimulationTelemetry()
         divergence_history: dict[str, list[float]] = {key: [] for key in compiled.fluid_solvers}
         fluid_mass_history: dict[str, list[float]] = {key: [] for key in compiled.fluid_solvers}
+        cloth_quality_history: dict[str, list[dict[str, Any]]] = {key: [] for key in compiled.cloth_particle_indices}
         max_body_linear_speed = 0.0
         max_body_angular_speed = 0.0
         max_particle_speed = 0.0
+        coupling_exchange_count = 0
+        max_interface_velocity_residual = 0.0
+        max_impulse_balance_error = 0.0
+        max_angular_impulse_balance_error = 0.0
+        max_exchange_energy_error = 0.0
+        coupling_contact_times: dict[str, tuple[float, float]] = {}
         state_in, state_out = compiled.state_0, compiled.state_1
+        coupling_scheduler = CoupledSimulationScheduler(scene, self._triangle_shape_correction, self._copy_array)
         initial_particle_q = state_in.particle_q.numpy().copy() if state_in.particle_q is not None else np.empty((0, 3))
         completed_frames = 0
+        coupling_failure_streak = 0
         for frame_index in range(frame_count):
+            frame_interface_residual = 0.0
             for substep_index in range(scene.settings.substeps):
                 if cancel_event is not None and cancel_event.is_set():
                     raise _SimulationCancelled
@@ -233,18 +256,60 @@ class SceneExecutorLocal:
                     compiled.contacts,
                     substep_dt,
                 )
-                triangle_contacts, triangle_contact_pairs = self._project_cloth_triangle_contacts(
+                triangle_contacts, triangle_contact_pairs, substep_exchanges = coupling_scheduler.step_interfaces(
                     scene, compiled, state_in, state_out, substep_dt
                 )
-                if triangle_contacts:
-                    self._limit_cloth_strain(scene, compiled, state_out)
                 soft_contact_count += triangle_contacts
                 contact_count += triangle_contacts
                 if triangle_contacts:
                     soft_contact_pairs.update(triangle_contact_pairs)
-                for fluid_solver in compiled.fluid_solvers.values():
-                    fluid_solver.step(state_in, state_out, compiled.control, compiled.contacts, substep_dt)
+                if compiled.cloth_particle_indices:
+                    self._limit_cloth_strain(scene, compiled, state_out)
                 state_in, state_out = state_out, state_in
+                coupling_exchange_count += len(substep_exchanges)
+                max_interface_velocity_residual = max(
+                    max_interface_velocity_residual,
+                    max((item.interface_residual for item in substep_exchanges), default=0.0),
+                )
+                frame_interface_residual = max(
+                    frame_interface_residual,
+                    max((item.interface_residual for item in substep_exchanges), default=0.0),
+                )
+                max_impulse_balance_error = max(
+                    max_impulse_balance_error,
+                    max((item.impulse_balance_error for item in substep_exchanges), default=0.0),
+                )
+                max_angular_impulse_balance_error = max(
+                    max_angular_impulse_balance_error,
+                    max(
+                        (item.angular_impulse_balance_error for item in substep_exchanges),
+                        default=0.0,
+                    ),
+                )
+                max_exchange_energy_error = max(
+                    max_exchange_energy_error,
+                    max((item.exchange_energy_error for item in substep_exchanges), default=0.0),
+                )
+                for exchange in substep_exchanges:
+                    key = f"{exchange.pair_type}:{exchange.object_a}|{exchange.object_b}"
+                    first, _last = coupling_contact_times.get(key, (time_value, time_value))
+                    coupling_contact_times[key] = (first, time_value + substep_dt)
+                if capture_cache:
+                    telemetry.append(
+                        self._capture_substep_telemetry(
+                            scene,
+                            compiled,
+                            state_in,
+                            initial_particle_q,
+                            frame_index,
+                            substep_index,
+                            time_value + substep_dt,
+                            current_contacts,
+                            active_contact_indices,
+                            shape_objects,
+                            substep_exchanges,
+                        )
+                    )
             self._record_trajectories(scene, compiled, state_in, trajectories)
             frame_state: dict[str, np.ndarray] = {}
             if state_in.body_q is not None:
@@ -265,6 +330,15 @@ class SceneExecutorLocal:
                     max_particle_speed,
                     float(np.linalg.norm(frame_state["cloth_qd"], axis=1).max(initial=0.0)),
                 )
+                for object_id, indices in compiled.cloth_particle_indices.items():
+                    selected = np.asarray(indices, dtype=int)
+                    cloth_quality_history[object_id].append(
+                        self._cloth_quality(
+                            scene.objects[object_id],
+                            initial_particle_q[selected],
+                            frame_state["cloth_q"][selected],
+                        )
+                    )
             for object_id, solver in compiled.fluid_solvers.items():
                 if scene.objects[object_id].phase == "smoke":
                     frame_state[f"{object_id}_density"] = solver.density.numpy().astype(np.float32)
@@ -294,6 +368,20 @@ class SceneExecutorLocal:
             if issue is not None:
                 diagnostics.append(issue)
                 break
+            if scene.settings.coupling.mode == "strong":
+                if frame_interface_residual > scene.settings.coupling.interface_tolerance:
+                    coupling_failure_streak += 1
+                else:
+                    coupling_failure_streak = 0
+                if coupling_failure_streak >= 3:
+                    diagnostics.append(
+                        {
+                            "code": "coupling_nonconvergence",
+                            "frame": frame_index,
+                            "residual": frame_interface_residual,
+                            "message": "Strong-coupling interface residual exceeded tolerance for three frames.",
+                        }
+                    )
             for object_id, fluid_solver in compiled.fluid_solvers.items():
                 if getattr(fluid_solver, "capacity_overflow", False):
                     diagnostics.append(
@@ -331,6 +419,8 @@ class SceneExecutorLocal:
                 )
             if progress is not None:
                 progress.update(stage="simulation", frame=frame_index + 1, total_frames=frame_count)
+            if any(item.get("code") in _PHYSICS_FAILURE_CODES for item in diagnostics):
+                break
         fluid_stats = {}
         for object_id, item in scene.objects.items():
             if isinstance(item, ObjectFluid):
@@ -348,6 +438,8 @@ class SceneExecutorLocal:
                     stats.update(
                         density_mass=float(density.sum()),
                         occupied_cells=int(np.count_nonzero(density > 1.0e-5)),
+                        cloth_density_penetration=dict(solver.cloth_density_penetration),
+                        cloth_penetration_count=dict(solver.cloth_penetration_count),
                         max_divergence=float(np.max(np.abs(divergence))),
                         finite=bool(np.isfinite(density).all() and np.isfinite(divergence).all()),
                     )
@@ -368,6 +460,8 @@ class SceneExecutorLocal:
                         rigid_angular_impulse={
                             str(body): impulse.tolist() for body, impulse in solver.rigid_angular_impulse.items()
                         },
+                        coupling=coupling_scheduler.rigid_fluid.diagnostics(object_id, solver),
+                        cloth_penetration_count=dict(solver.cloth_penetration_count),
                         finite=bool(
                             np.isfinite(positions).all()
                             and np.isfinite(solver.grid_velocity).all()
@@ -395,6 +489,14 @@ class SceneExecutorLocal:
             final = final_particle_q[selected]
             velocities = final_particle_qd[selected]
             quality = self._cloth_quality(scene.objects[object_id], initial, final)
+            samples = cloth_quality_history[object_id] or [quality]
+            quality = {
+                "min_edge_length_ratio": min(item["min_edge_length_ratio"] for item in samples),
+                "max_edge_length_ratio": max(item["max_edge_length_ratio"] for item in samples),
+                "min_triangle_area_ratio": min(item["min_triangle_area_ratio"] for item in samples),
+                "max_triangle_area_ratio": max(item["max_triangle_area_ratio"] for item in samples),
+                "flipped_triangle_count": max(item["flipped_triangle_count"] for item in samples),
+            }
             cloth_stats[object_id] = {
                 "finite": bool(np.isfinite(final).all() and np.isfinite(velocities).all()),
                 "max_displacement": float(np.linalg.norm(final - initial, axis=1).max(initial=0.0)),
@@ -417,10 +519,14 @@ class SceneExecutorLocal:
                     }
                 )
         physics = _physics_validation(diagnostics)
+        trajectory_hash = hashlib.sha256(
+            json.dumps(trajectories, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
         return {
             "status": "completed" if physics["valid"] else "physics_failed",
             "scene": scene.name,
             "scene_hash": scene_hash,
+            "trajectory_hash": trajectory_hash,
             "frames": completed_frames,
             "backend": "newton",
             "pipeline": compiled.pipeline,
@@ -448,13 +554,150 @@ class SceneExecutorLocal:
                     "max_body_angular_speed": max_body_angular_speed,
                     "max_particle_speed": max_particle_speed,
                 },
+                "coupling": {
+                    "exchange_count": coupling_exchange_count,
+                    "interface_velocity_residual": max_interface_velocity_residual,
+                    "impulse_balance_error": max_impulse_balance_error,
+                    "angular_impulse_balance_error": max_angular_impulse_balance_error,
+                    "exchange_energy_error": max_exchange_energy_error,
+                    "contact_duration": {key: last - first for key, (first, last) in coupling_contact_times.items()},
+                    "coupling_iterations": scene.settings.coupling.iterations,
+                    "coupling_nonconvergence": (
+                        scene.settings.coupling.mode == "strong"
+                        and max_interface_velocity_residual > scene.settings.coupling.interface_tolerance
+                    ),
+                },
                 "resources": estimate_resources(scene),
                 "physics": physics,
             },
             "trajectories": trajectories,
             "diagnostics": diagnostics,
-            **({"state_frames": state_frames, "contact_records": contact_records} if capture_cache else {}),
+            **(
+                {
+                    "state_frames": state_frames,
+                    "contact_records": contact_records,
+                    "telemetry_records": telemetry.to_records(),
+                }
+                if capture_cache
+                else {}
+            ),
         }
+
+    def _capture_substep_telemetry(
+        self,
+        scene: Scene,
+        compiled: Any,
+        state: Any,
+        initial_particle_q: np.ndarray,
+        frame: int,
+        substep: int,
+        time_value: float,
+        contact_count: int,
+        active_contact_indices: np.ndarray,
+        shape_objects: dict[int, str],
+        coupling_exchanges: list[CouplingExchange],
+    ) -> FrameTelemetry:
+        """Capture bounded summaries without embedding full arrays in JSON."""
+        record = FrameTelemetry(
+            frame=frame,
+            substep=substep,
+            time=time_value,
+            solver_stats=SolverTelemetry(
+                iterations=max(scene.settings.rigid.iterations, scene.settings.cloth.iterations),
+                coupling_iterations=scene.settings.coupling.iterations,
+            ),
+        )
+        record.coupling_exchanges.extend(coupling_exchanges)
+        if state.body_qd is not None:
+            velocities = state.body_qd.numpy()
+            for object_id, body in compiled.body_indices.items():
+                value = velocities[body]
+                record.body_states[object_id] = BodyTelemetry(
+                    linear_speed=float(np.linalg.norm(value[:3])),
+                    angular_speed=float(np.linalg.norm(value[3:])),
+                    finite=bool(np.isfinite(value).all()),
+                )
+        if state.particle_q is not None:
+            positions = state.particle_q.numpy()
+            velocities = state.particle_qd.numpy()
+            for object_id, indices in compiled.cloth_particle_indices.items():
+                selected = np.asarray(indices, dtype=int)
+                quality = self._cloth_quality(
+                    scene.objects[object_id], initial_particle_q[selected], positions[selected]
+                )
+                record.cloth_states[object_id] = ClothTelemetry(
+                    max_speed=float(np.linalg.norm(velocities[selected], axis=1).max(initial=0.0)),
+                    finite=bool(np.isfinite(positions[selected]).all() and np.isfinite(velocities[selected]).all()),
+                    **quality,
+                )
+        for object_id, solver in compiled.fluid_solvers.items():
+            divergence = solver.divergence.numpy() if hasattr(solver.divergence, "numpy") else solver.divergence
+            if scene.objects[object_id].phase == "smoke":
+                density = solver.density.numpy()
+                mass = float(density.sum())
+                particles = 0
+                finite = bool(np.isfinite(density).all() and np.isfinite(divergence).all())
+            else:
+                masses = solver.particle_mass[: solver.particle_count]
+                mass = float(masses.sum())
+                particles = int(solver.particle_count)
+                finite = bool(
+                    np.isfinite(solver.particle_position[: solver.particle_count]).all()
+                    and np.isfinite(divergence).all()
+                )
+            record.fluid_states[object_id] = FluidTelemetry(
+                mass=mass,
+                max_divergence=float(np.max(np.abs(divergence), initial=0.0)),
+                particle_count=particles,
+                finite=finite,
+            )
+            residual = record.fluid_states[object_id].max_divergence
+            record.solver_stats.residual = max(record.solver_stats.residual or 0.0, residual)
+            record.solver_stats.impulse_clips += int(getattr(solver, "impulse_clip_count", 0))
+        record.solver_stats.coupling_nonconvergence = (
+            scene.settings.coupling.mode == "strong"
+            and max((item.interface_residual for item in coupling_exchanges), default=0.0)
+            > scene.settings.coupling.interface_tolerance
+        )
+        if contact_count:
+            shape_a = compiled.contacts.rigid_contact_shape0.numpy()[:contact_count]
+            shape_b = compiled.contacts.rigid_contact_shape1.numpy()[:contact_count]
+            shape_bodies = compiled.model.shape_body.numpy()
+            penetrations = self._contact_penetrations(compiled, state, contact_count)
+            normal_impulses = (
+                compiled.solver.rigid_contact_normal_impulse.numpy()[:contact_count]
+                if hasattr(compiled.solver, "rigid_contact_normal_impulse")
+                else np.zeros(contact_count)
+            )
+            tangential_impulses = (
+                compiled.solver.rigid_contact_tangential_impulse.numpy()[:contact_count]
+                if hasattr(compiled.solver, "rigid_contact_tangential_impulse")
+                else np.zeros(contact_count)
+            )
+            impulse_indices = np.flatnonzero((normal_impulses > 0.0) | (tangential_impulses > 0.0))
+            record_indices = np.union1d(active_contact_indices, impulse_indices)
+            for index in record_indices:
+                object_a = shape_objects.get(int(shape_a[index]))
+                object_b = shape_objects.get(int(shape_b[index]))
+                if int(shape_a[index]) < 0:
+                    object_a = "__ground__"
+                elif object_a is None and int(shape_bodies[int(shape_a[index])]) < 0:
+                    object_a = "__ground__"
+                if int(shape_b[index]) < 0:
+                    object_b = "__ground__"
+                elif object_b is None and int(shape_bodies[int(shape_b[index])]) < 0:
+                    object_b = "__ground__"
+                if object_a is not None and object_b is not None:
+                    record.contacts.append(
+                        ContactTelemetry(
+                            object_a,
+                            object_b,
+                            penetration=max(0.0, float(penetrations[index])),
+                            normal_impulse=float(normal_impulses[index]),
+                            tangential_impulse=float(tangential_impulses[index]),
+                        )
+                    )
+        return record
 
     @staticmethod
     def _cloth_quality(item: ObjectCloth, initial: np.ndarray, final: np.ndarray) -> dict[str, Any]:
@@ -742,82 +985,6 @@ class SceneExecutorLocal:
             }
         return None
 
-    def _project_cloth_triangle_contacts(
-        self, scene: Scene, compiled: Any, state_in: Any, state_out: Any, dt: float
-    ) -> tuple[int, set[tuple[str, str]]]:
-        """Project cloth triangles out of simple rigid shapes after one solver step."""
-        if state_out.particle_q is None:
-            return 0, set()
-        positions = state_out.particle_q.numpy()
-        velocities = state_out.particle_qd.numpy()
-        inverse_masses = compiled.model.particle_inv_mass.numpy()
-        body_q = state_out.body_q.numpy() if state_out.body_q is not None else np.empty((0, 7))
-        body_qd = state_out.body_qd.numpy() if state_out.body_qd is not None else np.empty((0, 6))
-        body_inv_mass = (
-            compiled.model.body_inv_mass.numpy() if compiled.model.body_inv_mass is not None else np.empty(0)
-        )
-        changed = False
-        body_changed = False
-        contact_count = 0
-        contact_pairs: set[tuple[str, str]] = set()
-        colliders: list[tuple[str | None, str, np.ndarray, np.ndarray, np.ndarray, int]] = []
-        if scene.render.ground:
-            colliders.append((None, "plane", np.zeros(3), np.array([1.0, 1.0, 0.0]), np.array([0, 0, 0, 1]), -1))
-        for object_id, item in scene.objects.items():
-            if not isinstance(item, ObjectRigid) or item.shape not in {"sphere", "box"}:
-                continue
-            body = compiled.body_indices.get(object_id, -1)
-            if body >= 0:
-                center = body_q[body, :3].copy()
-                rotation = body_q[body, 3:].copy()
-            else:
-                center = np.asarray(item.transform.position, dtype=float)
-                rotation = np.asarray(item.transform.rotation, dtype=float)
-            size = np.asarray(item.size, dtype=float) * np.asarray(item.transform.scale, dtype=float)
-            colliders.append((object_id, item.shape, center, size, rotation, body))
-        for object_id, indices in compiled.cloth_particle_indices.items():
-            cloth = scene.objects[object_id]
-            width, height = cloth.resolution
-            radius = cloth.collision_radius or cloth.thickness
-            offset = indices[0]
-            for y in range(height - 1):
-                for x in range(width - 1):
-                    lower = offset + y * width + x
-                    for triangle in ((lower, lower + 1, lower + width + 1), (lower, lower + width + 1, lower + width)):
-                        tri = positions[np.asarray(triangle)]
-                        for collider_id, kind, center, size, rotation, body in colliders:
-                            correction, weights = self._triangle_shape_correction(
-                                tri, kind, center, size, rotation, radius
-                            )
-                            if correction is None:
-                                continue
-                            weights = weights * inverse_masses[np.asarray(triangle)]
-                            weight_sum = float(weights.sum())
-                            rigid_weight = float(body_inv_mass[body]) if body >= 0 else 0.0
-                            denominator = weight_sum + rigid_weight
-                            if denominator <= 0.0:
-                                continue
-                            normal = correction / max(float(np.linalg.norm(correction)), 1.0e-12)
-                            for vertex, weight in zip(triangle, weights, strict=True):
-                                positions[vertex] += correction * (weight / denominator)
-                                inward_speed = float(np.dot(velocities[vertex], normal))
-                                if inward_speed < 0.0:
-                                    velocities[vertex] -= normal * inward_speed
-                            if rigid_weight:
-                                body_q[body, :3] -= correction * (rigid_weight / denominator)
-                                body_changed = True
-                            changed = True
-                            contact_count += 1
-                            if collider_id is not None:
-                                contact_pairs.add(tuple(sorted((object_id, collider_id))))
-        if changed:
-            self._copy_array(state_out.particle_q, positions)
-            self._copy_array(state_out.particle_qd, velocities)
-        if body_changed:
-            self._copy_array(state_out.body_q, body_q)
-            self._copy_array(state_out.body_qd, body_qd)
-        return contact_count, contact_pairs
-
     def _limit_cloth_strain(self, scene: Scene, compiled: Any, state: Any) -> None:
         """Limit collision-induced cloth edge stretch without adding spring energy."""
         if state.particle_q is None:
@@ -842,7 +1009,7 @@ class SceneExecutorLocal:
                         edge_specs.append((vertex, vertex + width, rest_y))
                     if x + 1 < width and y + 1 < height:
                         edge_specs.append((vertex, vertex + width + 1, math.hypot(rest_x, rest_y)))
-            for _ in range(3):
+            for _ in range(scene.settings.cloth.strain_limit_iterations):
                 for first, second, rest_length in edge_specs:
                     delta = positions[second] - positions[first]
                     length = float(np.linalg.norm(delta))
@@ -858,6 +1025,55 @@ class SceneExecutorLocal:
                     positions[first] += correction * (first_weight / weight_sum)
                     positions[second] -= correction * (second_weight / weight_sum)
                     changed = True
+            triangles = []
+            for y in range(height - 1):
+                for x in range(width - 1):
+                    lower = offset + y * width + x
+                    triangles.extend(
+                        (
+                            (lower, lower + 1, lower + width + 1),
+                            (lower, lower + width + 1, lower + width),
+                        )
+                    )
+            rest_positions = compiled.initial_particle_q
+            for first, second, third in triangles:
+                rest_normal = np.cross(
+                    rest_positions[second] - rest_positions[first],
+                    rest_positions[third] - rest_positions[first],
+                )
+                rest_area = float(np.linalg.norm(rest_normal))
+                if rest_area <= 1.0e-12:
+                    continue
+                normal = rest_normal / rest_area
+                first_edge = positions[second] - positions[first]
+                second_edge = positions[third] - positions[first]
+                signed_area = float(np.dot(normal, np.cross(first_edge, second_edge)))
+                minimum_area = rest_area * 0.06
+                if signed_area >= minimum_area:
+                    continue
+                gradients = (
+                    np.cross(positions[second] - positions[third], normal),
+                    np.cross(second_edge, normal),
+                    np.cross(normal, first_edge),
+                )
+                vertices = (first, second, third)
+                denominator = sum(
+                    float(inverse_masses[vertex]) * float(np.dot(gradient, gradient))
+                    for vertex, gradient in zip(vertices, gradients, strict=True)
+                )
+                if denominator <= 1.0e-12:
+                    continue
+                delta_lambda = (minimum_area - signed_area) / denominator
+                corrections = [
+                    inverse_masses[vertex] * delta_lambda * gradient
+                    for vertex, gradient in zip(vertices, gradients, strict=True)
+                ]
+                maximum_correction = max((float(np.linalg.norm(value)) for value in corrections), default=0.0)
+                correction_limit = 0.05 * math.sqrt(rest_area)
+                scale = min(1.0, correction_limit / maximum_correction) if maximum_correction else 1.0
+                for vertex, correction in zip(vertices, corrections, strict=True):
+                    positions[vertex] += scale * correction
+                changed = True
         if changed:
             self._copy_array(state.particle_q, positions)
 
@@ -1028,7 +1244,8 @@ class SceneExecutorLocal:
         preview_scene.settings.duration = min(1.0, scene.settings.duration)
         preview_scene.settings.fps = min(30, scene.settings.fps)
         preview_scene.settings.substeps = min(12, scene.settings.substeps)
-        preview_scene.settings.solver_iterations = min(10, scene.settings.solver_iterations)
+        preview_scene.settings.rigid.iterations = min(10, scene.settings.rigid.iterations)
+        preview_scene.settings.cloth.iterations = min(10, scene.settings.cloth.iterations)
         preview_scene.settings.max_particles = min(50_000, scene.settings.max_particles)
         preview_scene.render.resolution = (640, 360)
         original_sizes: dict[str, Any] = {}
@@ -1088,7 +1305,8 @@ class SceneExecutorLocal:
             "duration": preview_scene.settings.duration,
             "fps": preview_scene.settings.fps,
             "substeps": preview_scene.settings.substeps,
-            "solver_iterations": preview_scene.settings.solver_iterations,
+            "rigid_iterations": preview_scene.settings.rigid.iterations,
+            "cloth_iterations": preview_scene.settings.cloth.iterations,
             "frames": effective_frames,
             "resolution": list(preview_scene.render.resolution),
             "max_particles": preview_scene.settings.max_particles,
@@ -1603,12 +1821,18 @@ class SceneExecutorLocal:
         output_dir = output_dir.resolve()
         cache_dir = output_dir / "cache"
         frames_dir = cache_dir / "frames"
+        telemetry_dir = output_dir / "telemetry"
         frames_dir.mkdir(parents=True, exist_ok=True)
+        telemetry_dir.mkdir(parents=True, exist_ok=True)
         scene_path = output_dir / "scene.json"
         program_path = output_dir / "program.py"
         metrics_path = output_dir / "metrics.json"
+        objective_path = output_dir / "objective.json"
         diagnostics_path = output_dir / "diagnostics.jsonl"
         contacts_path = cache_dir / "contacts.jsonl"
+        telemetry_contacts_path = telemetry_dir / "contacts.jsonl"
+        coupling_path = telemetry_dir / "coupling.jsonl"
+        solver_path = telemetry_dir / "solver.jsonl"
         cache_manifest_path = cache_dir / "manifest.json"
         job_manifest_path = output_dir / "manifest.json"
         animation_path = output_dir / "animation.mp4"
@@ -1620,8 +1844,10 @@ class SceneExecutorLocal:
             "scene": str(scene_path),
             "program": str(program_path),
             "metrics": str(metrics_path),
+            "objective": str(objective_path),
             "diagnostics": str(diagnostics_path),
             "cache": str(cache_dir),
+            "telemetry": str(telemetry_dir),
         }
 
         def update(stage: str, frame: int = 0, status: str = "running") -> None:
@@ -1644,6 +1870,9 @@ class SceneExecutorLocal:
         self.compiler.export_program(scene, program_path)
         diagnostics_path.write_text("", encoding="utf-8")
         contacts_path.write_text("", encoding="utf-8")
+        telemetry_contacts_path.write_text("", encoding="utf-8")
+        coupling_path.write_text("", encoding="utf-8")
+        solver_path.write_text("", encoding="utf-8")
         cache_manifest_path.write_text(
             json.dumps(
                 {
@@ -1688,6 +1917,7 @@ class SceneExecutorLocal:
         simulation.pop("trajectories")
         simulation.pop("state_frames")
         contact_records = simulation.pop("contact_records")
+        telemetry_records = simulation.pop("telemetry_records")
         frame_count = simulation["frames"]
         for frame_index in range(frame_count):
             if cancel_event is not None and cancel_event.is_set():
@@ -1709,9 +1939,45 @@ class SceneExecutorLocal:
             "".join(json.dumps(item, sort_keys=True) + "\n" for item in contact_records),
             encoding="utf-8",
         )
+        telemetry_contacts_path.write_text(
+            "".join(
+                json.dumps({"frame": item["frame"], "substep": item["substep"], **contact}, sort_keys=True) + "\n"
+                for item in telemetry_records
+                for contact in item["contacts"]
+            ),
+            encoding="utf-8",
+        )
+        coupling_path.write_text(
+            "".join(
+                json.dumps({"frame": item["frame"], "substep": item["substep"], **exchange}, sort_keys=True) + "\n"
+                for item in telemetry_records
+                for exchange in item["coupling_exchanges"]
+            ),
+            encoding="utf-8",
+        )
+        solver_path.write_text(
+            "".join(
+                json.dumps(
+                    {
+                        "frame": item["frame"],
+                        "substep": item["substep"],
+                        "time": item["time"],
+                        "body_states": item["body_states"],
+                        "cloth_states": item["cloth_states"],
+                        "fluid_states": item["fluid_states"],
+                        "solver_stats": item["solver_stats"],
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+                for item in telemetry_records
+            ),
+            encoding="utf-8",
+        )
         metrics = {
             **simulation["metrics"],
             "scene_hash": scene_hash,
+            "trajectory_hash": simulation["trajectory_hash"],
             "output_dir": str(output_dir),
             "timings": {
                 "compile_seconds": compile_seconds,
@@ -1720,6 +1986,8 @@ class SceneExecutorLocal:
             "peak_device_memory_bytes": peak_device_memory,
         }
         metrics_path.write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
+        objective = MetricPipeline().evaluate(simulation, runtime_sec=simulation_seconds)
+        objective_path.write_text(json.dumps(objective.to_dict(), indent=2) + "\n", encoding="utf-8")
         cache_manifest = {
             "schema_version": 1,
             "scene_hash": scene_hash,

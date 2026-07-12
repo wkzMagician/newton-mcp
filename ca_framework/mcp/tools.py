@@ -102,7 +102,7 @@ class SceneTools:
     def get_capabilities(self) -> dict[str, Any]:
         """Return supported IR features and solver routes."""
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "objects": ["rigid", "cloth", "fluid", "container"],
             "rigid_shapes": ["box", "sphere", "capsule", "compound"],
             "fluid_phases": ["smoke", "liquid"],
@@ -125,7 +125,8 @@ class SceneTools:
                 "duration": 1.0,
                 "fps": 30,
                 "substeps": 12,
-                "solver_iterations": 10,
+                "rigid": {"iterations": 10},
+                "cloth": {"iterations": 10},
                 "resolution": [640, 360],
                 "liquid_capacity": 50_000,
                 "cloth_axis": 24,

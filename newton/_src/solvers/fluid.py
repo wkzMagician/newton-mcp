@@ -14,6 +14,21 @@ from .ca_exercises.solver_exercise5_fluid import SolverExercise5Fluid, apply_den
 from .solver import SolverBase
 
 
+def _aggregate_cloth_angular_impulses(boundaries, positions, vertex_impulses):
+    """Aggregate distributed cloth impulses about each cloth centroid [N m s]."""
+    result = {}
+    for boundary in boundaries:
+        vertices = np.unique(np.asarray(boundary.triangles, dtype=np.int32).reshape(-1))
+        if not len(vertices):
+            result[boundary.object_id] = np.zeros(3, dtype=np.float32)
+            continue
+        center = positions[vertices].mean(axis=0)
+        result[boundary.object_id] = (
+            np.cross(positions[vertices] - center, vertex_impulses[vertices]).sum(axis=0).astype(np.float32)
+        )
+    return result
+
+
 @wp.kernel
 def _scale_density(field: wp.array3d(dtype=float), factor: float):
     i, j, k = wp.tid()
@@ -88,6 +103,13 @@ class SolverFluidSmoke(SolverExercise5Fluid):
         body: int | None = None
         local_position: tuple[float, float, float] | None = None
 
+    @dataclass(slots=True)
+    class ClothBoundary:
+        """Triangulated moving smoke obstacle."""
+
+        object_id: str
+        triangles: np.ndarray
+
     def __init__(
         self,
         model,
@@ -98,6 +120,10 @@ class SolverFluidSmoke(SolverExercise5Fluid):
         buoyancy: float = 0.1,
         dissipation: float = 0.01,
         emitters: list[Emitter] | None = None,
+        drag_density: float = 1.225,
+        drag_coefficient: float = 0.0,
+        coupling_iterations: int = 1,
+        coupling_relaxation: float = 1.0,
     ):
         placeholder = ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
         super().__init__(
@@ -117,16 +143,47 @@ class SolverFluidSmoke(SolverExercise5Fluid):
         self.dissipation = float(dissipation)
         self.emitters = list(emitters or [])
         self.boundaries: list[SolverFluidSmoke.Boundary] = []
+        self.cloth_boundaries: list[SolverFluidSmoke.ClothBoundary] = []
+        self.drag_density = drag_density
+        self.drag_coefficient = drag_coefficient
+        if coupling_iterations <= 0 or not 0.0 < coupling_relaxation <= 1.0:
+            raise ValueError("Smoke coupling iterations must be positive and relaxation must be in (0, 1]")
+        self.coupling_iterations = coupling_iterations
+        self.coupling_relaxation = coupling_relaxation
+        shape = (self.nx, self.ny, self.nz)
+        self._solid_cloth = np.full(shape, -1, dtype=np.int32)
+        self._solid_cloth_vertices = np.full((*shape, 3), -1, dtype=np.int32)
+        self._solid_cloth_weights = np.zeros((*shape, 3), dtype=np.float32)
+        self.cloth_linear_impulse: dict[str, np.ndarray] = {}
+        self.fluid_cloth_linear_impulse: dict[str, np.ndarray] = {}
+        self.cloth_angular_impulse: dict[str, np.ndarray] = {}
+        self.fluid_cloth_angular_impulse: dict[str, np.ndarray] = {}
+        self.cloth_penetration_count: dict[str, int] = {}
+        self.cloth_density_penetration: dict[str, float] = {}
         self._solid_velocity = np.zeros((self.nx, self.ny, self.nz, 3), dtype=np.float32)
+        self._solid_body = np.full(shape, -1, dtype=np.int32)
+        self.rigid_linear_impulse: dict[int, np.ndarray] = {}
+        self.rigid_angular_impulse: dict[int, np.ndarray] = {}
+        self.rigid_pressure_impulse: dict[int, np.ndarray] = {}
+        self.rigid_stabilization_impulse: dict[int, np.ndarray] = {}
+        self.impulse_clip_count = 0
         self.time = 0.0
 
     def add_boundary(self, boundary: Boundary) -> None:
         """Register a static, kinematic, or dynamic smoke obstacle."""
         self.boundaries.append(boundary)
 
+    def add_cloth_boundary(self, boundary: ClothBoundary) -> None:
+        """Register cloth triangles as a moving smoke obstacle."""
+        self.cloth_boundaries.append(boundary)
+
     def _update_boundaries(self, state_in) -> None:
         solid = np.zeros((self.nx, self.ny, self.nz), dtype=np.int32)
         self._solid_velocity.fill(0.0)
+        self._solid_body.fill(-1)
+        self._solid_cloth.fill(-1)
+        self._solid_cloth_vertices.fill(-1)
+        self._solid_cloth_weights.fill(0.0)
         body_q = state_in.body_q.numpy() if state_in is not None and state_in.body_q is not None else None
         body_qd = state_in.body_qd.numpy() if state_in is not None and state_in.body_qd is not None else None
         coordinates = np.stack(
@@ -145,9 +202,40 @@ class SolverFluidSmoke(SolverExercise5Fluid):
             mask = np.all(np.abs(coordinates - position) <= np.asarray(boundary.half_extent), axis=-1)
             solid[mask] = 1
             if boundary.body is not None and body_qd is not None:
+                self._solid_body[mask] = boundary.body
                 linear = body_qd[boundary.body, :3]
                 angular = body_qd[boundary.body, 3:]
                 self._solid_velocity[mask] = (linear + np.cross(angular, coordinates - position))[mask]
+        if self.cloth_boundaries and state_in is not None and state_in.particle_q is not None:
+            particle_q = state_in.particle_q.numpy()
+            particle_qd = state_in.particle_qd.numpy()
+            cell_size = np.asarray((self.size_x / self.nx, self.size_y / self.ny, self.size_z / self.nz))
+            resolution = np.asarray((self.nx, self.ny, self.nz))
+            for cloth_index, boundary in enumerate(self.cloth_boundaries):
+                for triangle in boundary.triangles:
+                    vertices = particle_q[triangle]
+                    edge_length = max(
+                        float(np.linalg.norm(vertices[1] - vertices[0])),
+                        float(np.linalg.norm(vertices[2] - vertices[1])),
+                        float(np.linalg.norm(vertices[0] - vertices[2])),
+                    )
+                    divisions = min(64, max(1, int(np.ceil(edge_length / (np.min(cell_size) * 0.5)))))
+                    for first in range(divisions + 1):
+                        for second in range(divisions + 1 - first):
+                            weights = np.asarray(
+                                [first / divisions, second / divisions, 1.0 - (first + second) / divisions],
+                                dtype=np.float32,
+                            )
+                            sample = weights @ vertices
+                            cell = np.floor((sample - np.asarray(self.grid_min)) / cell_size).astype(int)
+                            if np.any(cell < 0) or np.any(cell >= resolution):
+                                continue
+                            key = tuple(cell)
+                            solid[key] = 1
+                            self._solid_cloth[key] = cloth_index
+                            self._solid_cloth_vertices[key] = triangle
+                            self._solid_cloth_weights[key] = weights
+                            self._solid_velocity[key] = weights @ particle_qd[triangle]
         wp.copy(self.solid, wp.array(solid, dtype=wp.int32, device=self.model.device))
 
     def _enforce_solid_velocity(self) -> None:
@@ -208,6 +296,19 @@ class SolverFluidSmoke(SolverExercise5Fluid):
         """Advance smoke advection and pressure projection by ``dt`` [s]."""
         self._update_boundaries(state_in)
         result = super().step(state_in, state_out, control, contacts, dt)
+        density = self.density.numpy()
+        density_total = max(float(density.sum()), 1.0e-12)
+        self.cloth_density_penetration = {}
+        self.cloth_penetration_count = {}
+        for cloth_index, boundary in enumerate(self.cloth_boundaries):
+            mask = self._solid_cloth == cloth_index
+            values = density[mask]
+            self.cloth_density_penetration[boundary.object_id] = float(values.sum()) / density_total
+            self.cloth_penetration_count[boundary.object_id] = int(np.count_nonzero(values > 1.0e-5))
+        coupling_dt = dt / self.coupling_iterations * self.coupling_relaxation
+        for iteration in range(self.coupling_iterations):
+            self._apply_rigid_drag(state_out, coupling_dt, reset=iteration == 0)
+            self._apply_cloth_drag(state_out, coupling_dt, reset=iteration == 0)
         if self.dissipation:
             wp.launch(
                 _scale_density,
@@ -217,6 +318,178 @@ class SolverFluidSmoke(SolverExercise5Fluid):
             )
         self.time += dt
         return result
+
+    def _apply_rigid_drag(self, state_out, dt: float, *, reset: bool = True) -> None:
+        """Apply optional smoke drag to dynamic rigid obstacles."""
+        if reset:
+            self.rigid_linear_impulse.clear()
+            self.rigid_angular_impulse.clear()
+            self.rigid_pressure_impulse.clear()
+            self.rigid_stabilization_impulse.clear()
+            self.impulse_clip_count = 0
+        if (
+            self.drag_coefficient <= 0.0
+            or state_out is None
+            or state_out.body_qd is None
+            or not np.any(self._solid_body >= 0)
+        ):
+            return
+        u, v, w = self.u.numpy(), self.v.numpy(), self.w.numpy()
+        cell_velocity = np.stack(
+            (
+                0.5 * (u[:-1] + u[1:]),
+                0.5 * (v[:, :-1] + v[:, 1:]),
+                0.5 * (w[:, :, :-1] + w[:, :, 1:]),
+            ),
+            axis=-1,
+        )
+        velocities = state_out.body_qd.numpy()
+        transforms = state_out.body_q.numpy()
+        masses = self.model.body_mass.numpy()
+        inverse_inertia = self.model.body_inv_inertia.numpy()
+        cell_size = np.asarray((self.size_x / self.nx, self.size_y / self.ny, self.size_z / self.nz))
+        area = float(np.min(cell_size) ** 2)
+        volume = float(np.prod(cell_size))
+        centers = np.stack(
+            np.meshgrid(
+                self.grid_min[0] + (np.arange(self.nx) + 0.5) * cell_size[0],
+                self.grid_min[1] + (np.arange(self.ny) + 0.5) * cell_size[1],
+                self.grid_min[2] + (np.arange(self.nz) + 0.5) * cell_size[2],
+                indexing="ij",
+            ),
+            axis=-1,
+        )
+        for body_value in np.unique(self._solid_body[self._solid_body >= 0]):
+            body = int(body_value)
+            if masses[body] <= 0.0:
+                continue
+            mask = self._solid_body == body
+            relative = cell_velocity[mask] - self._solid_velocity[mask]
+            speed = np.linalg.norm(relative, axis=1)
+            cell_impulses = 0.5 * self.drag_density * self.drag_coefficient * area * speed[:, None] * relative * dt
+            impulse = cell_impulses.sum(axis=0)
+            angular_impulse = np.cross(centers[mask] - transforms[body, :3], cell_impulses).sum(axis=0)
+            maximum = masses[body] * 2.0 * dt
+            norm = float(np.linalg.norm(impulse))
+            if norm > maximum > 0.0:
+                scale = maximum / norm
+                impulse *= scale
+                angular_impulse *= scale
+                cell_impulses *= scale
+                self.impulse_clip_count += 1
+            velocities[body, :3] += impulse / masses[body]
+            if inverse_inertia.size:
+                velocities[body, 3:] += inverse_inertia[body] @ angular_impulse
+            self.rigid_linear_impulse[body] = np.asarray(
+                self.rigid_linear_impulse.get(body, np.zeros(3)) + impulse, dtype=np.float32
+            )
+            self.rigid_angular_impulse[body] = np.asarray(
+                self.rigid_angular_impulse.get(body, np.zeros(3)) + angular_impulse,
+                dtype=np.float32,
+            )
+            self.rigid_pressure_impulse[body] = np.zeros(3, dtype=np.float32)
+            self.rigid_stabilization_impulse[body] = self.rigid_linear_impulse[body].copy()
+            fluid_delta = -cell_impulses / max(self.drag_density * volume, 1.0e-12)
+            for cell, delta in zip(np.argwhere(mask), fluid_delta, strict=True):
+                i, j, k = cell
+                u[i, j, k] += delta[0] * 0.5
+                u[i + 1, j, k] += delta[0] * 0.5
+                v[i, j, k] += delta[1] * 0.5
+                v[i, j + 1, k] += delta[1] * 0.5
+                w[i, j, k] += delta[2] * 0.5
+                w[i, j, k + 1] += delta[2] * 0.5
+        wp.copy(self.u, wp.array(u, dtype=float, device=self.model.device))
+        wp.copy(self.v, wp.array(v, dtype=float, device=self.model.device))
+        wp.copy(self.w, wp.array(w, dtype=float, device=self.model.device))
+        wp.copy(
+            state_out.body_qd,
+            wp.array(velocities, dtype=state_out.body_qd.dtype, device=state_out.body_qd.device),
+        )
+
+    def _apply_cloth_drag(self, state_out, dt: float, *, reset: bool = True) -> None:
+        if reset:
+            self.cloth_linear_impulse.clear()
+            self.fluid_cloth_linear_impulse.clear()
+            self.cloth_angular_impulse.clear()
+            self.fluid_cloth_angular_impulse.clear()
+        if (
+            not self.cloth_boundaries
+            or self.drag_coefficient <= 0.0
+            or state_out is None
+            or state_out.particle_qd is None
+        ):
+            return
+        u, v, w = self.u.numpy(), self.v.numpy(), self.w.numpy()
+        cell_velocity = np.stack(
+            (
+                0.5 * (u[:-1] + u[1:]),
+                0.5 * (v[:, :-1] + v[:, 1:]),
+                0.5 * (w[:, :, :-1] + w[:, :, 1:]),
+            ),
+            axis=-1,
+        )
+        particle_velocity = state_out.particle_qd.numpy()
+        inverse_mass = self.model.particle_inv_mass.numpy()
+        vertex_impulses = np.zeros_like(particle_velocity, dtype=np.float64)
+        cell_size = np.asarray((self.size_x / self.nx, self.size_y / self.ny, self.size_z / self.nz))
+        area = float(np.min(cell_size) ** 2)
+        volume = float(np.prod(cell_size))
+        for cell in np.argwhere(self._solid_cloth >= 0):
+            key = tuple(cell)
+            cloth_index = int(self._solid_cloth[key])
+            boundary = self.cloth_boundaries[cloth_index]
+            vertices = self._solid_cloth_vertices[key]
+            weights = self._solid_cloth_weights[key]
+            cloth_velocity = weights @ particle_velocity[vertices]
+            relative = cell_velocity[key] - cloth_velocity
+            speed = float(np.linalg.norm(relative))
+            impulse = 0.5 * self.drag_density * self.drag_coefficient * area * speed * relative * dt
+            movable_mass = np.divide(
+                1.0,
+                inverse_mass[vertices],
+                out=np.zeros(3),
+                where=inverse_mass[vertices] > 0.0,
+            ).sum()
+            impulse_norm = float(np.linalg.norm(impulse))
+            maximum_impulse = movable_mass * 0.25
+            if impulse_norm > maximum_impulse > 0.0:
+                impulse *= maximum_impulse / impulse_norm
+            for vertex, weight in zip(vertices, weights, strict=True):
+                vertex_impulses[vertex] += impulse * float(weight)
+            self.cloth_linear_impulse[boundary.object_id] = (
+                self.cloth_linear_impulse.get(boundary.object_id, np.zeros(3)) + impulse
+            )
+            fluid_delta = -impulse / max(self.drag_density * volume, 1.0e-12)
+            i, j, k = key
+            u[i, j, k] += fluid_delta[0] * 0.5
+            u[i + 1, j, k] += fluid_delta[0] * 0.5
+            v[i, j, k] += fluid_delta[1] * 0.5
+            v[i, j + 1, k] += fluid_delta[1] * 0.5
+            w[i, j, k] += fluid_delta[2] * 0.5
+            w[i, j, k + 1] += fluid_delta[2] * 0.5
+        for vertex in np.flatnonzero(np.linalg.norm(vertex_impulses, axis=1) > 0.0):
+            particle_velocity[vertex] += vertex_impulses[vertex] * inverse_mass[vertex]
+        angular_impulses = _aggregate_cloth_angular_impulses(
+            self.cloth_boundaries, state_out.particle_q.numpy(), vertex_impulses
+        )
+        for object_id, impulse in angular_impulses.items():
+            self.cloth_angular_impulse[object_id] = np.asarray(
+                self.cloth_angular_impulse.get(object_id, np.zeros(3)) + impulse,
+                dtype=np.float32,
+            )
+        self.fluid_cloth_angular_impulse = {
+            object_id: -impulse for object_id, impulse in self.cloth_angular_impulse.items()
+        }
+        for object_id, impulse in self.cloth_linear_impulse.items():
+            self.cloth_linear_impulse[object_id] = np.asarray(impulse, dtype=np.float32)
+            self.fluid_cloth_linear_impulse[object_id] = -np.asarray(impulse, dtype=np.float32)
+        wp.copy(self.u, wp.array(u, dtype=float, device=self.model.device))
+        wp.copy(self.v, wp.array(v, dtype=float, device=self.model.device))
+        wp.copy(self.w, wp.array(w, dtype=float, device=self.model.device))
+        wp.copy(
+            state_out.particle_qd,
+            wp.array(particle_velocity, dtype=state_out.particle_qd.dtype, device=state_out.particle_qd.device),
+        )
 
 
 class SolverFluidAPIC(SolverBase):
@@ -269,6 +542,13 @@ class SolverFluidAPIC(SolverBase):
         body: int | None = None
         local_position: tuple[float, float, float] | None = None
 
+    @dataclass(slots=True)
+    class ClothBoundary:
+        """Triangulated cloth coupled as a moving liquid boundary."""
+
+        object_id: str
+        triangles: np.ndarray
+
     def __init__(
         self,
         model,
@@ -281,6 +561,12 @@ class SolverFluidAPIC(SolverBase):
         density: float = 1000.0,
         viscosity: float = 0.001,
         surface_tension: float = 0.072,
+        coupling_iterations: int = 1,
+        coupling_relaxation: float = 1.0,
+        cfl_number: float = 0.5,
+        cloth_drag: float = 1.0,
+        cloth_permeability: float = 0.0,
+        boundary_friction: float = 0.0,
     ):
         if any(value < 2 for value in grid_resolution):
             raise ValueError("grid_resolution axes must contain at least two cells")
@@ -292,6 +578,14 @@ class SolverFluidAPIC(SolverBase):
             raise ValueError("pressure_iters must be positive")
         if max_particles <= 0:
             raise ValueError("max_particles must be positive")
+        if not 1 <= coupling_iterations <= 4:
+            raise ValueError("coupling_iterations must be between one and four")
+        if not 0.0 < coupling_relaxation <= 1.0:
+            raise ValueError("coupling_relaxation must be in (0, 1]")
+        if cfl_number <= 0.0:
+            raise ValueError("cfl_number must be positive")
+        if cloth_drag < 0.0 or not 0.0 <= cloth_permeability <= 1.0 or boundary_friction < 0.0:
+            raise ValueError("Invalid cloth-fluid boundary coefficients")
         super().__init__(model)
         self.grid_resolution = tuple(int(value) for value in grid_resolution)
         self.domain_size = np.asarray(domain_size, dtype=np.float64)
@@ -304,6 +598,12 @@ class SolverFluidAPIC(SolverBase):
         self.density = density
         self.viscosity = viscosity
         self.surface_tension = surface_tension
+        self.coupling_iterations = coupling_iterations
+        self.coupling_relaxation = coupling_relaxation
+        self.cfl_number = cfl_number
+        self.cloth_drag = cloth_drag
+        self.cloth_permeability = cloth_permeability
+        self.boundary_friction = boundary_friction
         self.particle_count = 0
         self.particle_position = np.zeros((max_particles, 3), dtype=np.float32)
         self.particle_velocity = np.zeros((max_particles, 3), dtype=np.float32)
@@ -321,9 +621,21 @@ class SolverFluidAPIC(SolverBase):
         self.solid_velocity = np.zeros((*shape, 3), dtype=np.float32)
         self.emitters: list[SolverFluidAPIC.Emitter] = []
         self.boundaries: list[SolverFluidAPIC.Boundary] = []
+        self.cloth_boundaries: list[SolverFluidAPIC.ClothBoundary] = []
+        self.solid_cloth = np.full(shape, -1, dtype=np.int32)
+        self.solid_cloth_vertices = np.full((*shape, 3), -1, dtype=np.int32)
+        self.solid_cloth_weights = np.zeros((*shape, 3), dtype=np.float32)
+        self.cloth_linear_impulse: dict[str, np.ndarray] = {}
+        self.fluid_cloth_linear_impulse: dict[str, np.ndarray] = {}
+        self.cloth_angular_impulse: dict[str, np.ndarray] = {}
+        self.fluid_cloth_angular_impulse: dict[str, np.ndarray] = {}
+        self.cloth_penetration_count: dict[str, int] = {}
         self.capacity_overflow = False
         self.rigid_linear_impulse: dict[int, np.ndarray] = {}
         self.rigid_angular_impulse: dict[int, np.ndarray] = {}
+        self.rigid_pressure_impulse: dict[int, np.ndarray] = {}
+        self.rigid_stabilization_impulse: dict[int, np.ndarray] = {}
+        self.impulse_clip_count = 0
         self._last_emission_step: dict[int, int] = {}
         self._step_count = 0
         self._nominal_particle_mass = 0.0
@@ -372,6 +684,10 @@ class SolverFluidAPIC(SolverBase):
         """Register an axis-aligned solid boundary."""
         self.boundaries.append(boundary)
 
+    def add_cloth_boundary(self, boundary: ClothBoundary) -> None:
+        """Register cloth triangles as a moving no-penetration boundary."""
+        self.cloth_boundaries.append(boundary)
+
     def step(self, state_in, state_out, control, contacts, dt):
         """Advance APIC transfer, pressure projection, and particles by ``dt`` [s]."""
         del control, contacts
@@ -389,7 +705,16 @@ class SolverFluidAPIC(SolverBase):
         if self.surface_tension:
             self._apply_surface_tension(dt)
         self._project(dt)
-        self._couple_rigid_bodies(state_out, dt)
+        self._reset_coupling_diagnostics()
+        coupling_dt = dt / self.coupling_iterations
+        for iteration in range(self.coupling_iterations):
+            self._couple_cloth_boundaries(state_out, coupling_dt, reset=iteration == 0)
+            self._couple_rigid_bodies(
+                state_out,
+                coupling_dt,
+                relaxation=self.coupling_relaxation,
+                reset=False,
+            )
         self._grid_to_particles(dt)
         self._apply_particle_boundary_impulses(state_in)
         if self._step_count % 4 == 0:
@@ -397,6 +722,77 @@ class SolverFluidAPIC(SolverBase):
         self._step_count += 1
         self.time += dt
         return None
+
+    def _couple_cloth_boundaries(self, state_out, dt: float, *, reset: bool = True) -> None:
+        if reset:
+            self.cloth_linear_impulse.clear()
+            self.fluid_cloth_linear_impulse.clear()
+            self.cloth_penetration_count = {boundary.object_id: 0 for boundary in self.cloth_boundaries}
+            self.cloth_angular_impulse.clear()
+            self.fluid_cloth_angular_impulse.clear()
+        if not self.cloth_boundaries or state_out is None or state_out.particle_qd is None:
+            return
+        particle_velocity = state_out.particle_qd.numpy()
+        inverse_mass = self.model.particle_inv_mass.numpy()
+        vertex_impulses = np.zeros_like(particle_velocity, dtype=np.float64)
+        for axis in range(3):
+            cell_area = float(np.prod(np.delete(self.cell_size, axis)))
+            for direction in (-1, 1):
+                neighbour_cloth = self._shifted(self.solid_cloth, axis, direction, -1)
+                interface = self.fluid & (neighbour_cloth >= 0)
+                if not np.any(interface):
+                    continue
+                neighbour_vertices = self._shifted(self.solid_cloth_vertices, axis, direction, -1)
+                neighbour_weights = self._shifted(self.solid_cloth_weights, axis, direction, 0.0)
+                cells = np.argwhere(interface)
+                for cell in cells:
+                    key = tuple(cell)
+                    cloth_index = int(neighbour_cloth[key])
+                    boundary = self.cloth_boundaries[cloth_index]
+                    pressure = max(float(self.pressure[key]), 0.0)
+                    impulse = np.zeros(3, dtype=np.float64)
+                    impulse[axis] = (
+                        direction * pressure * cell_area * dt * self.cloth_drag * (1.0 - self.cloth_permeability)
+                    )
+                    vertices = neighbour_vertices[key]
+                    weights = neighbour_weights[key]
+                    movable_mass = np.divide(
+                        1.0,
+                        inverse_mass[vertices],
+                        out=np.zeros(3),
+                        where=inverse_mass[vertices] > 0.0,
+                    ).sum()
+                    impulse_norm = float(np.linalg.norm(impulse))
+                    maximum_impulse = movable_mass
+                    if impulse_norm > maximum_impulse > 0.0:
+                        impulse *= maximum_impulse / impulse_norm
+                        self.impulse_clip_count += 1
+                    for vertex, weight in zip(vertices, weights, strict=True):
+                        if vertex >= 0:
+                            vertex_impulses[vertex] += impulse * float(weight)
+                    self.cloth_linear_impulse[boundary.object_id] = (
+                        self.cloth_linear_impulse.get(boundary.object_id, np.zeros(3)) + impulse
+                    )
+        for vertex in np.flatnonzero(np.linalg.norm(vertex_impulses, axis=1) > 0.0):
+            particle_velocity[vertex] += vertex_impulses[vertex] * inverse_mass[vertex]
+        angular_impulses = _aggregate_cloth_angular_impulses(
+            self.cloth_boundaries, state_out.particle_q.numpy(), vertex_impulses
+        )
+        for object_id, impulse in angular_impulses.items():
+            self.cloth_angular_impulse[object_id] = np.asarray(
+                self.cloth_angular_impulse.get(object_id, np.zeros(3)) + impulse,
+                dtype=np.float32,
+            )
+        self.fluid_cloth_angular_impulse = {
+            object_id: -impulse for object_id, impulse in self.cloth_angular_impulse.items()
+        }
+        for object_id, impulse in self.cloth_linear_impulse.items():
+            self.cloth_linear_impulse[object_id] = np.asarray(impulse, dtype=np.float32)
+            self.fluid_cloth_linear_impulse[object_id] = -np.asarray(impulse, dtype=np.float32)
+        wp.copy(
+            state_out.particle_qd,
+            wp.array(particle_velocity, dtype=state_out.particle_qd.dtype, device=state_out.particle_qd.device),
+        )
 
     def _apply_particle_boundary_impulses(self, state_in) -> None:
         if state_in is None or state_in.body_q is None or self.particle_count == 0:
@@ -449,6 +845,9 @@ class SolverFluidAPIC(SolverBase):
         self.solid.fill(False)
         self.solid_body.fill(-1)
         self.solid_velocity.fill(0.0)
+        self.solid_cloth.fill(-1)
+        self.solid_cloth_vertices.fill(-1)
+        self.solid_cloth_weights.fill(0.0)
         body_q = state_in.body_q.numpy() if state_in is not None and state_in.body_q is not None else None
         body_qd = state_in.body_qd.numpy() if state_in is not None and state_in.body_qd is not None else None
         cell_centers = np.stack(
@@ -482,6 +881,40 @@ class SolverFluidAPIC(SolverBase):
                 self.solid_velocity[mask] = velocity[mask]
             else:
                 self.solid_velocity[mask] = velocity
+        self._rasterize_cloth_boundaries(state_in)
+
+    def _rasterize_cloth_boundaries(self, state_in) -> None:
+        if not self.cloth_boundaries or state_in is None or state_in.particle_q is None:
+            return
+        positions = state_in.particle_q.numpy()
+        velocities = state_in.particle_qd.numpy()
+        resolution = np.asarray(self.grid_resolution)
+        sample_scale = max(float(np.min(self.cell_size)) * 0.5, 1.0e-8)
+        for cloth_index, boundary in enumerate(self.cloth_boundaries):
+            for triangle in boundary.triangles:
+                vertices = positions[triangle]
+                edge_length = max(
+                    float(np.linalg.norm(vertices[1] - vertices[0])),
+                    float(np.linalg.norm(vertices[2] - vertices[1])),
+                    float(np.linalg.norm(vertices[0] - vertices[2])),
+                )
+                divisions = min(64, max(1, int(np.ceil(edge_length / sample_scale))))
+                for first in range(divisions + 1):
+                    for second in range(divisions + 1 - first):
+                        weights = np.asarray(
+                            [first / divisions, second / divisions, 1.0 - (first + second) / divisions],
+                            dtype=np.float32,
+                        )
+                        sample = weights @ vertices
+                        cell = np.floor((sample - self.domain_min) / self.cell_size).astype(int)
+                        if np.any(cell < 0) or np.any(cell >= resolution):
+                            continue
+                        key = tuple(cell)
+                        self.solid[key] = True
+                        self.solid_cloth[key] = cloth_index
+                        self.solid_cloth_vertices[key] = triangle
+                        self.solid_cloth_weights[key] = weights
+                        self.solid_velocity[key] = weights @ velocities[triangle]
 
     @staticmethod
     def _quat_rotate(quaternion: np.ndarray, vectors: np.ndarray) -> np.ndarray:
@@ -632,9 +1065,16 @@ class SolverFluidAPIC(SolverBase):
             self.divergence += np.gradient(velocity[..., axis], self.cell_size[axis], axis=axis, edge_order=1)
         self.divergence[~self.fluid] = 0.0
 
-    def _couple_rigid_bodies(self, state_out, dt: float) -> None:
+    def _reset_coupling_diagnostics(self) -> None:
         self.rigid_linear_impulse.clear()
         self.rigid_angular_impulse.clear()
+        self.rigid_pressure_impulse.clear()
+        self.rigid_stabilization_impulse.clear()
+        self.impulse_clip_count = 0
+
+    def _couple_rigid_bodies(self, state_out, dt: float, *, relaxation: float = 1.0, reset: bool = True) -> None:
+        if reset:
+            self._reset_coupling_diagnostics()
         if state_out is None or state_out.body_qd is None:
             return
         transforms = state_out.body_q.numpy()
@@ -676,15 +1116,24 @@ class SolverFluidAPIC(SolverBase):
                     torque += np.cross(face_positions - position, face_force).sum(axis=0)
             rotated_basis = self._quat_rotate(transforms[body, 3:], np.eye(3))
             world_inertia = rotated_basis.T @ inertias[body] @ rotated_basis
-            force -= masses[body] * 4.0 * velocities[body, :3]
-            torque -= world_inertia @ (4.0 * velocities[body, 3:])
-            impulse = force * dt
-            angular_impulse = torque * dt
+            pressure_force = force.copy()
+            stabilization_force = -masses[body] * 4.0 * velocities[body, :3]
+            stabilization_torque = -(world_inertia @ (4.0 * velocities[body, 3:]))
+            force += stabilization_force
+            torque += stabilization_torque
+            pressure_impulse = pressure_force * dt * relaxation
+            stabilization_impulse = stabilization_force * dt * relaxation
+            impulse = pressure_impulse + stabilization_impulse
+            angular_impulse = torque * dt * relaxation
             gravity = abs(float(self.model.gravity.numpy()[0, 2]))
             max_impulse = masses[body] * 2.0 * gravity * dt
             impulse_norm = float(np.linalg.norm(impulse))
             if impulse_norm > max_impulse > 0.0:
-                impulse *= max_impulse / impulse_norm
+                scale = max_impulse / impulse_norm
+                impulse *= scale
+                pressure_impulse *= scale
+                stabilization_impulse *= scale
+                self.impulse_clip_count += 1
             angular_velocity_delta = np.linalg.solve(world_inertia, angular_impulse)
             max_angular_velocity_delta = 20.0 * dt
             angular_delta_norm = float(np.linalg.norm(angular_velocity_delta))
@@ -692,10 +1141,21 @@ class SolverFluidAPIC(SolverBase):
                 scale = max_angular_velocity_delta / angular_delta_norm
                 angular_impulse *= scale
                 angular_velocity_delta *= scale
+                self.impulse_clip_count += 1
             velocities[body, :3] += impulse / masses[body]
             velocities[body, 3:] += angular_velocity_delta
-            self.rigid_linear_impulse[body] = impulse.astype(np.float32)
-            self.rigid_angular_impulse[body] = angular_impulse.astype(np.float32)
+            self.rigid_linear_impulse[body] = (self.rigid_linear_impulse.get(body, np.zeros(3)) + impulse).astype(
+                np.float32
+            )
+            self.rigid_angular_impulse[body] = (
+                self.rigid_angular_impulse.get(body, np.zeros(3)) + angular_impulse
+            ).astype(np.float32)
+            self.rigid_pressure_impulse[body] = (
+                self.rigid_pressure_impulse.get(body, np.zeros(3)) + pressure_impulse
+            ).astype(np.float32)
+            self.rigid_stabilization_impulse[body] = (
+                self.rigid_stabilization_impulse.get(body, np.zeros(3)) + stabilization_impulse
+            ).astype(np.float32)
         wp.copy(
             state_out.body_qd,
             wp.array(velocities, dtype=state_out.body_qd.dtype, device=state_out.body_qd.device),
@@ -715,7 +1175,7 @@ class SolverFluidAPIC(SolverBase):
         # the particle CFL condition, this bounds continuous-solid collision
         # sampling and prevents one unstable pressure update from producing an
         # unbounded number of trajectory samples.
-        maximum_speed = 0.5 * float(np.min(self.cell_size)) / max(dt, 1.0e-8)
+        maximum_speed = self.cfl_number * float(np.min(self.cell_size)) / max(dt, 1.0e-8)
         speeds = np.linalg.norm(velocities, axis=1)
         fast_velocity = speeds > maximum_speed
         if np.any(fast_velocity):
@@ -726,8 +1186,14 @@ class SolverFluidAPIC(SolverBase):
         next_indices = tuple(next_cells[:, axis] for axis in range(3))
         hits = self.solid[next_indices]
         if np.any(hits):
+            hit_cloth = self.solid_cloth[next_indices][hits]
+            for cloth_index in hit_cloth[hit_cloth >= 0]:
+                object_id = self.cloth_boundaries[int(cloth_index)].object_id
+                self.cloth_penetration_count[object_id] = self.cloth_penetration_count.get(object_id, 0) + 1
             next_positions[hits] = positions[hits]
             velocities[hits] = self.solid_velocity[next_indices][hits]
+            if self.boundary_friction > 0.0:
+                velocities[hits] /= 1.0 + self.boundary_friction
         displacements = next_positions - positions
         fast = np.flatnonzero(np.linalg.norm(displacements, axis=1) > np.min(self.cell_size) * 0.5)
         for particle in fast:
