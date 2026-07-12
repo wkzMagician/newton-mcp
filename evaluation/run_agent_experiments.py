@@ -187,6 +187,7 @@ def run_case(
     run_root: Path,
     auth_source: Path | None,
     model: str | None,
+    reasoning: str | None,
     timeout: float,
     dry_run: bool,
     allow_over_budget: bool = False,
@@ -233,7 +234,8 @@ def run_case(
     ]
     if model:
         command.extend(("--model", model))
-
+    if reasoning:
+        command.extend(("-c", f'model_reasoning_effort="{reasoning}"'))
     started = time.monotonic()
     with (case_root / "codex-events.jsonl").open("w", encoding="utf-8") as events:
         process = subprocess.Popen(
@@ -289,7 +291,8 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--case", choices=sorted(AGENT_PROMPTS), action="append", dest="cases")
     parser.add_argument("--run-dir", type=Path, help="New directory that will contain this evaluation run")
-    parser.add_argument("--model", help="Optional Codex model override")
+    parser.add_argument("--model", default="gpt-5.6-terra", help="Optional Codex model override (default: gpt-5.6-terra)")
+    parser.add_argument("--reasoning", default="low", help="Optional reasoning effort (e.g. low, medium, high; default: low)")
     parser.add_argument("--timeout", type=float, default=1200.0, help="Timeout per case in seconds")
     parser.add_argument("--auth-file", type=Path, default=Path.home() / ".codex" / "auth.json")
     parser.add_argument("--no-auth-copy", action="store_true", help="Use OPENAI_API_KEY instead of copying auth.json")
@@ -428,6 +431,7 @@ def main() -> None:
                         run_root=run_root,
                         auth_source=auth_source,
                         model=args.model,
+                        reasoning=args.reasoning,
                         timeout=args.timeout,
                         dry_run=args.dry_run,
                         allow_over_budget=args.allow_over_budget,
