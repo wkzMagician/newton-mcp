@@ -101,6 +101,9 @@ class OptimizationPlan:
     max_wall_time_sec: float | None = None
     study_name: str | None = None
     storage_url: str | None = None
+    initial_parameters: tuple[dict[str, Any], ...] = ()
+    tpe_startup_trials: int = 16
+    cmaes_startup_trials: int = 1
     fidelity: FidelitySettings = field(default_factory=FidelitySettings)
     robustness_top_k: int = 3
     robustness_samples: int = 3
@@ -127,6 +130,19 @@ class OptimizationPlan:
             raise ValueError("Robustness counts and beta must be non-negative")
         if self.acceptable_objective < 0.0:
             raise ValueError("acceptable_objective must be non-negative")
+        if self.tpe_startup_trials < 0:
+            raise ValueError("tpe_startup_trials must be non-negative")
+        if self.cmaes_startup_trials < 0:
+            raise ValueError("cmaes_startup_trials must be non-negative")
+        specs = {item.path: item for item in self.parameters}
+        for parameters in self.initial_parameters:
+            if not parameters:
+                raise ValueError("Initial parameter candidates cannot be empty")
+            unknown = set(parameters).difference(specs)
+            if unknown:
+                raise ValueError(f"Initial parameter candidate contains unknown paths: {sorted(unknown)}")
+            for path, value in parameters.items():
+                specs[path].validate_value(value)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable plan."""
@@ -137,5 +153,6 @@ class OptimizationPlan:
         """Parse an optimization plan mapping."""
         data = dict(value)
         data["parameters"] = tuple(ParameterSpec(**item) for item in data.get("parameters", ()))
+        data["initial_parameters"] = tuple(dict(item) for item in data.get("initial_parameters", ()))
         data["fidelity"] = FidelitySettings(**data.get("fidelity", {}))
         return cls(**data)

@@ -24,6 +24,7 @@ from .dto import (
     ConstraintSpecDTO,
     FieldPatchDTO,
     FieldSpecDTO,
+    ObjectiveSettingsDTO,
     ObjectPatchDTO,
     ObjectSpecDTO,
     OptimizationPlanDTO,
@@ -95,7 +96,13 @@ def apply_scene_patch(scene_name: str, patch: ScenePatchDTO) -> dict[str, Any]:
 
 @mcp.tool()
 def add_object(scene_name: str, spec: ObjectSpecDTO) -> dict[str, Any]:
-    """Add a rigid body, cloth, smoke/liquid fluid, or compound container."""
+    """Add a rigid body, cloth, smoke/liquid fluid, or compound container.
+
+    For cloth, ``transform.position`` is the undeformed sheet center rather
+    than a grid corner. Its ``size`` extends equally in local x/y around that
+    point, then ``rotation`` is applied. Use ``preview_scene`` to verify
+    placement.
+    """
     return _tools().add_object(scene_name, spec.model_dump())
 
 
@@ -119,7 +126,10 @@ def add_action(scene_name: str, spec: ActionSpecDTO) -> dict[str, Any]:
 
 @mcp.tool()
 def update_object(scene_name: str, item_id: str, patch: ObjectPatchDTO) -> dict[str, Any]:
-    """Update one object; patch.kind must match its existing object kind."""
+    """Update one object; ``patch.kind`` must match its existing object kind.
+
+    A cloth transform position always denotes its undeformed sheet center.
+    """
     return _tools().update_object(scene_name, item_id, patch.model_dump(exclude_unset=True))
 
 
@@ -202,6 +212,7 @@ def create_optimization_plan(
     scene_name: str,
     plan: OptimizationPlanDTO,
     task_spec: TaskSpecDTO | None = None,
+    objective_settings: ObjectiveSettingsDTO | None = None,
     overwrite: bool = False,
 ) -> dict[str, Any]:
     """Create an optimization plan outside scene metadata."""
@@ -209,6 +220,7 @@ def create_optimization_plan(
         scene_name,
         plan.model_dump(),
         task_spec=task_spec.model_dump() if task_spec is not None else None,
+        objective_settings=objective_settings.model_dump() if objective_settings is not None else None,
         overwrite=overwrite,
     )
 

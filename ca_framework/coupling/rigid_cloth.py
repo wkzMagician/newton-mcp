@@ -116,7 +116,10 @@ class CouplerRigidCloth:
                             )
                             relative_velocity = cloth_velocity - rigid_velocity
                             normal_speed = float(np.dot(relative_velocity, normal))
-                            normal_impulse_magnitude = max(0.0, -normal_speed / denominator)
+                            # ``normal`` points from the rigid body toward the cloth.  A
+                            # positive relative speed therefore means that the rigid body
+                            # is approaching the cloth and needs a separating impulse.
+                            normal_impulse_magnitude = max(0.0, normal_speed / denominator)
                             cloth_impulse = normal * normal_impulse_magnitude
                             tangent_velocity = relative_velocity - normal * normal_speed
                             tangent_speed = float(np.linalg.norm(tangent_velocity))

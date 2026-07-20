@@ -14,9 +14,9 @@ The repository also contains a prompt-driven framework for generating animations
 - `knowledge/skills` contains focused simulation knowledge that an agent can load when translating a prompt into a scene.
 
 The runtime and agent-facing files intentionally contain no reference scenes or
-reference answers. The twelve canonical acceptance cases, their assertions, and
-benchmark commands live under `evaluation/`; do not expose that directory to an
-agent during a prompt-to-video experiment.
+reference answers. Black-box task prompts and benchmark commands live under
+`evaluation/`; do not expose that directory to an agent during a prompt-to-video
+experiment.
 
 Start the stdio MCP server from the repository root:
 
@@ -33,7 +33,7 @@ documented separately in `evaluation/README.md`.
 
 Scene optimization is a separate, reproducible workflow: an
 `OptimizationPlan` defines bounded physical parameters, an optional `TaskSpec`
-defines scene-specific losses, and Optuna proposes Random, TPE, or CMA-ES
+defines task losses, and Optuna proposes Random, TPE, or CMA-ES
 trials. Every trial passes through static validation, a short coarse rejection
 run, a full-resolution metric run, and optional finalist rendering. Optimization
 history is never stored in `Scene.metadata`.

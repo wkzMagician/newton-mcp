@@ -812,6 +812,10 @@ class FluidViewerGL(ViewerGL):
             raise TypeError("callback must be callable")
         self._post_render_callbacks.append(callback)
 
+    def clear_post_render_callbacks(self) -> None:
+        """Remove post-render callbacks from the preceding scene."""
+        self._post_render_callbacks.clear()
+
     def _update(self):
         """Mirror ViewerGL._update while inserting post-render callbacks."""
         self.renderer.update()

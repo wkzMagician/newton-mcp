@@ -59,6 +59,22 @@ class TestMcpSchema(unittest.TestCase):
         self.assertIn("emitters", schema["$defs"]["ObjectFluidDTO"]["properties"])
         self.assertIn("wall_thickness", schema["$defs"]["ObjectContainerDTO"]["properties"])
 
+    def test_cloth_schema_states_that_position_is_the_sheet_center(self):
+        schema = self.schemas["add_object"]
+        transform_position = schema["$defs"]["TransformDTO"]["properties"]["position"]["description"]
+        cloth_size = schema["$defs"]["ObjectClothDTO"]["properties"]["size"]["description"]
+        tool_description = next(tool.description for tool in asyncio.run(mcp.list_tools()) if tool.name == "add_object")
+        self.assertIn("center", transform_position)
+        self.assertIn("half", cloth_size)
+        self.assertIn("sheet center", tool_description)
+
+    def test_container_schema_states_floor_center_origin(self):
+        schema = self.schemas["add_object"]
+        properties = schema["$defs"]["ObjectContainerDTO"]["properties"]
+
+        self.assertIn("interior floor", properties["transform"]["description"])
+        self.assertIn("z interval runs from 0", properties["inner_size"]["description"])
+
     def test_all_add_tools_are_discriminated(self):
         for name in ("add_object", "add_constraint", "add_field", "add_action"):
             with self.subTest(name=name):
@@ -118,8 +134,26 @@ class TestMcpSchema(unittest.TestCase):
         self.assertTrue(expected.issubset(self.schemas))
         plan = self.schemas["create_optimization_plan"]["properties"]["plan"]
         self.assertEqual(plan["$ref"], "#/$defs/OptimizationPlanDTO")
+        plan_schema = self.schemas["create_optimization_plan"]["$defs"]["OptimizationPlanDTO"]
+        self.assertIn("initial_parameters", plan_schema["properties"])
         task_spec = self.schemas["create_optimization_plan"]["properties"]["task_spec"]
         self.assertEqual(task_spec["anyOf"][0]["$ref"], "#/$defs/TaskSpecDTO")
+        objective_settings = self.schemas["create_optimization_plan"]["properties"]["objective_settings"]
+        self.assertEqual(objective_settings["anyOf"][0]["$ref"], "#/$defs/ObjectiveSettingsDTO")
+
+    def test_capabilities_name_the_required_final_bundle_workflow_tools(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            capabilities = SceneTools(SceneStore(Path(temporary) / "scenes")).get_capabilities()
+
+        self.assertEqual(
+            capabilities["workflow_tools"],
+            {
+                "validate": "validate_scene",
+                "preview": "preview_scene",
+                "final_bundle": "run_scene",
+                "job_status": "get_job",
+            },
+        )
 
     def test_wire_validation_rejects_unknown_fields_and_bad_vectors(self):
         adapter = TypeAdapter(ObjectSpecDTO)

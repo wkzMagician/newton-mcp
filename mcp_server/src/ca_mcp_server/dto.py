@@ -24,7 +24,12 @@ class DTOBase(BaseModel):
 class TransformDTO(DTOBase):
     """World transform using SI units."""
 
-    position: Vec3 = Field((0.0, 0.0, 0.0), description="World translation [m].")
+    position: Vec3 = Field(
+        (0.0, 0.0, 0.0),
+        description=(
+            "World-space placement [m]. For cloth, this is the center of the undeformed sheet, not a corner."
+        ),
+    )
     rotation: Quat = Field((0.0, 0.0, 0.0, 1.0), description="Quaternion in (x, y, z, w) order.")
     scale: Vec3 = Field((1.0, 1.0, 1.0), description="Positive dimensionless local scale.")
 
@@ -97,11 +102,17 @@ class ObjectRigidDTO(ObjectBaseDTO):
 
 
 class ObjectClothDTO(ObjectBaseDTO):
-    """Rectangular cloth creation parameters."""
+    """Rectangular cloth creation parameters centered at ``transform.position``."""
 
     kind: Literal["cloth"]
-    size: Vec2 = Field((1.0, 1.0), description="Cloth dimensions [m].")
-    resolution: tuple[int, int] = Field((16, 16), description="Vertex counts along both cloth axes.")
+    size: Vec2 = Field(
+        (1.0, 1.0),
+        description="Cloth width and height [m] along local +x and +y; each extends half its length from the center.",
+    )
+    resolution: tuple[int, int] = Field(
+        (16, 16),
+        description="Vertex counts along the centered local x and y axes.",
+    )
     thickness: float = Field(0.01, gt=0.0, description="Collision thickness [m].")
     surface_density: float = Field(0.2, gt=0.0, description="Surface mass density [kg/m^2].")
     stretch_stiffness: float = Field(1000.0, ge=0.0, description="Stretch stiffness [N/m].")
@@ -114,7 +125,10 @@ class ObjectClothDTO(ObjectBaseDTO):
     collision_radius: float | None = Field(None, gt=0.0, description="Particle collision radius [m].")
     max_stretch_ratio: float = Field(1.2, ge=1.0, description="Maximum edge stretch relative to rest length.")
     self_collision: bool = False
-    pinned: list[VertexSelectorDTO] = Field(default_factory=list)
+    pinned: list[VertexSelectorDTO] = Field(
+        default_factory=list,
+        description="Vertices fixed at time zero; named edges/corners are defined in the cloth's centered local frame.",
+    )
 
 
 class ObjectFluidDTO(ObjectBaseDTO):
@@ -135,10 +149,23 @@ class ObjectFluidDTO(ObjectBaseDTO):
 
 
 class ObjectContainerDTO(ObjectBaseDTO):
-    """Open-top compound container creation parameters."""
+    """Open-top compound container whose local origin is the interior floor center."""
 
     kind: Literal["container"]
-    inner_size: Vec3 = Field((1.0, 1.0, 1.0), description="Interior dimensions [m].")
+    transform: TransformDTO = Field(
+        default_factory=TransformDTO,
+        description=(
+            "Container local-to-world transform. transform.position is the center of the interior floor, "
+            "not the volume center; local +z points from the floor toward the opening."
+        ),
+    )
+    inner_size: Vec3 = Field(
+        (1.0, 1.0, 1.0),
+        description=(
+            "Interior width, depth, and height [m]. The x/y interval is centered on the local origin, and "
+            "the z interval runs from 0 at the interior floor to inner_size[2] at the opening."
+        ),
+    )
     wall_thickness: float = Field(0.05, gt=0.0, description="Wall thickness [m].")
     transparent_shell: bool = True
     closed: bool = False
@@ -611,6 +638,15 @@ class OptimizationPlanDTO(DTOBase):
     max_wall_time_sec: float | None = Field(None, gt=0.0)
     study_name: str | None = None
     storage_url: str | None = None
+    initial_parameters: tuple[dict[str, JsonValue], ...] = Field(
+        default=(),
+        description=(
+            "Complete parameter mappings to evaluate before sampled trials, such as the current scene values "
+            "used as a baseline control. Each mapping must contain every active parameter path."
+        ),
+    )
+    tpe_startup_trials: int = Field(16, ge=0)
+    cmaes_startup_trials: int = Field(1, ge=0)
     fidelity: FidelitySettingsDTO = Field(default_factory=FidelitySettingsDTO)
     robustness_top_k: int = Field(3, ge=0, le=5)
     robustness_samples: int = Field(3, ge=0)
@@ -633,3 +669,29 @@ class TaskSpecDTO(DTOBase):
 
     name: str = Field(min_length=1)
     metrics: tuple[TaskMetricSpecDTO, ...] = ()
+
+
+class ObjectiveSettingsDTO(DTOBase):
+    """Serializable feasibility thresholds and objective weights for a study."""
+
+    infeasible_base: float = Field(1000.0, gt=0.0)
+    physics_weight: float = Field(1.0, ge=0.0)
+    task_weight: float = Field(1.0, ge=0.0)
+    cost_weight: float = Field(0.05, ge=0.0)
+    reference_runtime_sec: float = Field(1.0, gt=0.0)
+    max_penetration: float = Field(0.05, ge=0.0)
+    max_fluid_mass_error: float = Field(0.1, ge=0.0)
+    max_fluid_divergence: float = Field(10.0, ge=0.0)
+    max_smoke_density_penetration: float = Field(0.1, ge=0.0)
+    max_liquid_cloth_penetration_fraction: float = Field(0.1, ge=0.0)
+    max_cloth_edge_ratio: float = Field(2.0, ge=1.0)
+    min_cloth_area_ratio: float = Field(0.05, ge=0.0)
+    max_cloth_area_ratio: float = Field(4.0, ge=1.0)
+    max_impulse_balance_error: float = Field(0.05, ge=0.0)
+    max_angular_impulse_balance_error: float = Field(0.05, ge=0.0)
+    max_interface_velocity_residual: float = Field(10.0, ge=0.0)
+    max_exchange_energy_error: float = Field(100.0, ge=0.0)
+    max_rigid_cloth_penetration: float = Field(0.02, ge=0.0)
+    minimum_coupling_contact_duration: dict[str, float] = Field(default_factory=dict)
+    metric_thresholds: dict[str, float] = Field(default_factory=dict)
+    metric_weights: dict[str, float] = Field(default_factory=dict)

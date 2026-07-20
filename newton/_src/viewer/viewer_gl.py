@@ -1120,6 +1120,8 @@ class ViewerGL(ViewerBase):
         """
         Close the viewer and clean up resources.
         """
+        # Release CUDA/OpenGL interop while the viewer context is still current.
+        self._invalidate_pbo()
         self.renderer.close()
 
     @property

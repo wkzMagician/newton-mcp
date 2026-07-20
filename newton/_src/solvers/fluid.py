@@ -535,12 +535,13 @@ class SolverFluidAPIC(SolverBase):
 
     @dataclass(slots=True)
     class Boundary:
-        """Axis-aligned solid coupled to the liquid grid."""
+        """Box solid coupled to the liquid grid."""
 
         position: tuple[float, float, float]
         half_extent: tuple[float, float, float]
         body: int | None = None
         local_position: tuple[float, float, float] | None = None
+        rotation: tuple[float, float, float, float] | None = None
 
     @dataclass(slots=True)
     class ClothBoundary:
@@ -870,6 +871,8 @@ class SolverFluidAPIC(SolverBase):
                 local_position = np.asarray(boundary.local_position or (0.0, 0.0, 0.0))
                 position = body_position + self._quat_rotate(quaternion, local_position)
                 local_coordinates = self._quat_rotate_inverse(quaternion, cell_centers - position)
+            elif boundary.rotation is not None:
+                local_coordinates = self._quat_rotate_inverse(np.asarray(boundary.rotation), cell_centers - position)
             half_extent = np.asarray(boundary.half_extent)
             mask = np.all(np.abs(local_coordinates) <= half_extent + self.cell_size * 0.5, axis=-1)
             self.solid[mask] = True

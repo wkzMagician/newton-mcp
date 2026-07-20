@@ -23,6 +23,7 @@ from typing import Any
 from evaluation.agent_prompts import AGENT_PROMPTS, build_agent_prompt
 
 REQUIRED_FILES = ("animation.mp4", "scene.json", "program.py", "metrics.json", "diagnostics.jsonl")
+DIRECT_REQUIRED_FILES = ("animation.mp4", "program.py", "metrics.json", "diagnostics.jsonl")
 _ACTIVE_PROCESSES: set[int] = set()
 _ACTIVE_LOCK = Lock()
 
@@ -33,6 +34,28 @@ def _copy_agent_skills(repo: Path, workspace: Path) -> None:
     for source in sorted((repo / "knowledge" / "skills").glob("*")):
         if source.is_dir():
             shutil.copytree(source, destination / source.name)
+
+
+def _copy_newton_module(repo: Path, workspace: Path) -> None:
+    """Expose Newton source, but no project scene framework, to the direct baseline."""
+    shutil.copytree(
+        repo / "newton",
+        workspace / "newton",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+
+
+def _copy_objective_bundle(scene_store: Path, output_dir: Path, case_name: str) -> Path | None:
+    """Copy the Agent-authored objective contract beside the final scene bundle."""
+    source = scene_store / ".optimizations" / "plans" / f"objective-{case_name}"
+    required = ("optimization_plan.json", "scene.json", "task_spec.json", "objective_settings.json", "manifest.json")
+    if not source.is_dir() or not all((source / name).is_file() for name in required):
+        return None
+    destination = output_dir / "optimization-objective"
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(source, destination)
+    return destination
 
 
 def _prepare_codex_home(codex_home: Path, auth_source: Path | None) -> None:
@@ -74,12 +97,14 @@ def _register_mcp(
     subprocess.run(command, check=True, env=environment)
 
 
-def _artifact_status(output_dir: Path) -> dict[str, bool]:
+def _artifact_status(output_dir: Path, *, with_mcp: bool = True) -> dict[str, bool]:
+    required = REQUIRED_FILES if with_mcp else DIRECT_REQUIRED_FILES
     status = {
         name: (output_dir / name).is_file() and (name == "diagnostics.jsonl" or (output_dir / name).stat().st_size > 0)
-        for name in REQUIRED_FILES
+        for name in required
     }
-    status["cache"] = (output_dir / "cache").is_dir() and any((output_dir / "cache").iterdir())
+    if with_mcp:
+        status["cache"] = (output_dir / "cache").is_dir() and any((output_dir / "cache").iterdir())
     return status
 
 
@@ -190,22 +215,42 @@ def run_case(
     reasoning: str | None,
     timeout: float,
     dry_run: bool,
+    with_mcp: bool = True,
+    optimizer: str = "none",
+    create_optimization_objective: bool = False,
     allow_over_budget: bool = False,
 ) -> dict[str, Any]:
     """Run one experiment and return its machine-readable summary."""
+    if optimizer not in {"none", "random", "tpe", "cmaes"}:
+        raise ValueError(f"Unsupported optimizer: {optimizer}")
+    if optimizer != "none" and not with_mcp:
+        raise ValueError("Optimization requires --with-mcp because only MCP exposes the optimizer.")
     case_root = run_root / case_name
     workspace = case_root / "workspace"
     scene_store = case_root / "scene-store"
     output_dir = workspace / "result"
     codex_home = case_root / "codex-home"
-    for directory in (workspace, scene_store, output_dir):
+    directories = (workspace, scene_store, output_dir) if with_mcp else (workspace, output_dir)
+    for directory in directories:
         directory.mkdir(parents=True, exist_ok=False)
-    _copy_agent_skills(repo, workspace)
+    if with_mcp:
+        _copy_agent_skills(repo, workspace)
+    else:
+        _copy_newton_module(repo, workspace)
 
-    prompt = build_agent_prompt(case_name, str(output_dir))
+    prompt = build_agent_prompt(
+        case_name,
+        str(output_dir),
+        with_mcp=with_mcp,
+        optimizer=optimizer,
+        create_optimization_objective=create_optimization_objective,
+    )
     (case_root / "prompt.txt").write_text(prompt, encoding="utf-8")
     summary: dict[str, Any] = {
         "case": case_name,
+        "mcp_enabled": with_mcp,
+        "optimizer": optimizer,
+        "optimization_objective_required": with_mcp and create_optimization_objective,
         "status": "dry-run" if dry_run else "running",
         "workspace": str(workspace),
         "output_dir": str(output_dir),
@@ -217,9 +262,12 @@ def run_case(
     _prepare_codex_home(codex_home, auth_source)
     warp_cache = case_root / "warp-cache"
     warp_cache.mkdir()
-    _register_mcp(repo, codex_home, scene_store, allow_over_budget=allow_over_budget, warp_cache=warp_cache)
+    if with_mcp:
+        _register_mcp(repo, codex_home, scene_store, allow_over_budget=allow_over_budget, warp_cache=warp_cache)
     environment = {**os.environ, "CODEX_HOME": str(codex_home)}
     environment["WARP_CACHE_ROOT"] = str(warp_cache)
+    if not with_mcp:
+        environment["PYTHONPATH"] = str(workspace) + os.pathsep + environment.get("PYTHONPATH", "")
     command = [
         "codex",
         "exec",
@@ -265,9 +313,11 @@ def run_case(
             with _ACTIVE_LOCK:
                 _ACTIVE_PROCESSES.discard(process.pid)
 
-    artifacts = _artifact_status(output_dir)
+    artifacts = _artifact_status(output_dir, with_mcp=with_mcp)
     video_valid = _valid_video(output_dir / "animation.mp4")
-    job_status, physics_valid = _bundle_status(output_dir)
+    job_status, physics_valid = _bundle_status(output_dir) if with_mcp else (None, None)
+    objective_dir = _copy_objective_bundle(scene_store, output_dir, case_name) if with_mcp else None
+    objective_ready = objective_dir is not None or not create_optimization_objective
     summary.update(
         {
             "elapsed_seconds": round(time.monotonic() - started, 3),
@@ -275,12 +325,13 @@ def run_case(
             "video_valid": video_valid,
             "job_status": job_status,
             "physics_valid": physics_valid,
+            "optimization_objective": str(objective_dir) if objective_dir is not None else None,
             "status": "passed"
             if summary.get("codex_exit_code") == 0
             and all(artifacts.values())
             and video_valid
-            and job_status == "completed"
-            and physics_valid is True
+            and (not with_mcp or (job_status == "completed" and physics_valid is True))
+            and objective_ready
             else "failed",
         }
     )
@@ -292,7 +343,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--case", choices=sorted(AGENT_PROMPTS), action="append", dest="cases")
     parser.add_argument("--run-dir", type=Path, help="New directory that will contain this evaluation run")
     parser.add_argument(
-        "--model", default="gpt-5.6-terra", help="Optional Codex model override (default: gpt-5.6-terra)"
+        "--model", default="gpt-5.4", help="Optional Codex model override (default: gpt-5.4)"
     )
     parser.add_argument(
         "--reasoning", default="low", help="Optional reasoning effort (e.g. low, medium, high; default: low)"
@@ -304,6 +355,20 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--jobs", type=int, default=2, help="Maximum concurrent Codex processes")
     parser.add_argument("--resource-capacity", type=int, default=2, help="Maximum aggregate case resource weight")
     parser.add_argument("--allow-over-budget", action="store_true", help="Allow MCP hard resource limits with warnings")
+    parser.add_argument(
+        "--without-optimization-objective",
+        action="store_true",
+        help="Deprecated compatibility flag; objective contracts are collected after final MCP metrics are available",
+    )
+    parser.add_argument(
+        "--optimizer",
+        choices=("none", "random", "tpe", "cmaes"),
+        default="none",
+        help="Expose this optimizer to the MCP agent after scene authoring (default: none)",
+    )
+    mcp_group = parser.add_mutually_exclusive_group()
+    mcp_group.add_argument("--with-mcp", dest="mcp_enabled", action="store_true", default=True)
+    mcp_group.add_argument("--no-mcp", dest="mcp_enabled", action="store_false")
     parser.add_argument("--resume", type=Path, help="Resume a prior run directory")
     return parser.parse_args()
 
@@ -325,15 +390,18 @@ def _write_report(run_root: Path, results: list[dict[str, Any] | None]) -> None:
             continue
         case = escape(str(item["case"]))
         status = escape(str(item.get("status")))
+        mode = "MCP" if item.get("mcp_enabled", True) else "direct code"
+        optimizer = escape(str(item.get("optimizer", "none")))
         final_path = run_root / str(item["case"]) / "final-message.txt"
         final = escape(final_path.read_text(encoding="utf-8") if final_path.is_file() else "")
         rejected = " <strong>rejected</strong>" if item.get("physics_valid") is False else ""
         rows.append(
-            f"<tr><td>{case}</td><td>{status}{rejected}</td><td>{item.get('elapsed_seconds', '')}</td><td><pre>{final}</pre></td></tr>"
+            f"<tr><td>{case}</td><td>{mode}</td><td>{optimizer}</td><td>{status}{rejected}</td>"
+            f"<td>{item.get('elapsed_seconds', '')}</td><td><pre>{final}</pre></td></tr>"
         )
     (run_root / "report.html").write_text(
         "<!doctype html><meta charset=utf-8><title>Agent workflow report</title>"
-        "<h1>Agent workflow report</h1><table><tr><th>Case</th><th>Status</th><th>Seconds</th><th>Agent final</th></tr>"
+        "<h1>Agent workflow report</h1><table><tr><th>Case</th><th>Mode</th><th>Optimizer</th><th>Status</th><th>Seconds</th><th>Agent final</th></tr>"
         + "".join(rows)
         + "</table>",
         encoding="utf-8",
@@ -386,6 +454,10 @@ def main() -> None:
     args = _parse_args()
     if args.jobs < 1 or args.resource_capacity < 1:
         raise ValueError("--jobs and --resource-capacity must be positive")
+    if args.optimizer != "none" and not args.mcp_enabled:
+        raise ValueError("--optimizer requires --with-mcp.")
+    if args.optimizer != "none":
+        raise ValueError("Use evaluation.run_mcp_optimizer_suite for optimizer comparisons after MCP generation.")
     repo = Path(__file__).resolve().parents[1]
     run_root = (
         args.resume
@@ -408,7 +480,11 @@ def main() -> None:
             results[index] = previous[case_name]
         else:
             case_root = run_root / case_name
-            resumed = _resume_cached_render(case_name, case_root) if args.resume and case_root.exists() else None
+            resumed = (
+                _resume_cached_render(case_name, case_root)
+                if args.mcp_enabled and args.resume and case_root.exists()
+                else None
+            )
             if resumed is not None and resumed["status"] == "passed":
                 results[index] = resumed
                 continue
@@ -438,6 +514,9 @@ def main() -> None:
                         reasoning=args.reasoning,
                         timeout=args.timeout,
                         dry_run=args.dry_run,
+                        with_mcp=args.mcp_enabled,
+                        optimizer=args.optimizer,
+                        create_optimization_objective=False,
                         allow_over_budget=args.allow_over_budget,
                     )
                     running[future] = (index, case_name, weight)

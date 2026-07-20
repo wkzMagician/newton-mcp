@@ -13,7 +13,13 @@ import optuna
 from .model import OptimizationPlan, ParameterSpec
 
 
-def create_sampler(kind: str, seed: int) -> optuna.samplers.BaseSampler:
+def create_sampler(
+    kind: str,
+    seed: int,
+    *,
+    tpe_startup_trials: int = 16,
+    cmaes_startup_trials: int = 1,
+) -> optuna.samplers.BaseSampler:
     """Create one of the three supported deterministic samplers."""
     if kind == "random":
         return optuna.samplers.RandomSampler(seed=seed)
@@ -23,12 +29,16 @@ def create_sampler(kind: str, seed: int) -> optuna.samplers.BaseSampler:
             multivariate=True,
             group=True,
             constant_liar=True,
-            n_startup_trials=16,
+            n_startup_trials=tpe_startup_trials,
         )
     if kind == "cmaes":
         # Optuna 4.9 deprecates restart_strategy for a future major release;
         # keeping it isolated here makes that migration local.
-        return optuna.samplers.CmaEsSampler(seed=seed, restart_strategy="ipop")
+        return optuna.samplers.CmaEsSampler(
+            seed=seed,
+            restart_strategy="ipop",
+            n_startup_trials=cmaes_startup_trials,
+        )
     raise ValueError(f"Unsupported optimizer: {kind}")
 
 
@@ -37,7 +47,12 @@ def create_study(plan: OptimizationPlan) -> optuna.study.Study:
     return optuna.create_study(
         study_name=plan.study_name or plan.name,
         storage=plan.storage_url,
-        sampler=create_sampler(plan.optimizer, plan.seed),
+        sampler=create_sampler(
+            plan.optimizer,
+            plan.seed,
+            tpe_startup_trials=plan.tpe_startup_trials,
+            cmaes_startup_trials=plan.cmaes_startup_trials,
+        ),
         direction="minimize",
         load_if_exists=plan.storage_url is not None,
     )
@@ -85,6 +100,20 @@ def decode_parameters(specs: dict[str, ParameterSpec], values: dict[str, Any]) -
         else:
             decoded[path] = value
     return decoded
+
+
+def encode_parameters(specs: dict[str, ParameterSpec], values: dict[str, Any]) -> dict[str, Any]:
+    """Encode physical values for :meth:`optuna.study.Study.enqueue_trial`."""
+    encoded = {}
+    for path, value in values.items():
+        spec = specs[path]
+        spec.validate_value(value)
+        if spec.transform == "logit":
+            numeric = float(value)
+            encoded[path] = math.log(numeric / (1.0 - numeric))
+        else:
+            encoded[path] = value
+    return encoded
 
 
 def best_trial_payload(study: optuna.study.Study) -> dict[str, Any] | None:

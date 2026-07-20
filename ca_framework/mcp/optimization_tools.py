@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -16,7 +16,7 @@ from uuid import uuid4
 
 from ca_framework.optimization import OptimizationPlan, OptimizationRunner, activate_parameters, apply_parameter_patch
 from ca_framework.optimization.optuna_backend import distributions_for
-from ca_framework.metrics import TaskSpec
+from ca_framework.metrics import MetricPipeline, ObjectiveSettings, TaskSpec
 from ca_framework.scene import Scene, SceneExecutorLocal, SceneStore, validate_scene
 
 
@@ -41,6 +41,7 @@ class OptimizationTools:
         value: dict[str, Any],
         *,
         task_spec: dict[str, Any] | None = None,
+        objective_settings: dict[str, Any] | None = None,
         overwrite: bool = False,
     ) -> dict[str, Any]:
         """Validate and persist a plan beside an immutable base-scene snapshot."""
@@ -53,12 +54,14 @@ class OptimizationTools:
         path.mkdir(parents=True, exist_ok=True)
         scene_payload = scene.to_dict()
         parsed_task = TaskSpec.from_dict(task_spec) if task_spec is not None else None
+        parsed_objective = ObjectiveSettings(**objective_settings) if objective_settings is not None else None
         payload = {
             "plan": plan.to_dict(),
             "scene_name": scene_name,
             "base_scene": scene_payload,
             "base_scene_hash": _hash(scene_payload),
             "task_spec": parsed_task.to_dict() if parsed_task is not None else None,
+            "objective_settings": asdict(parsed_objective) if parsed_objective is not None else None,
         }
         (path / "optimization_plan.json").write_text(
             json.dumps(plan.to_dict(), indent=2) + "\n", encoding="utf-8"
@@ -68,12 +71,17 @@ class OptimizationTools:
             (path / "task_spec.json").write_text(
                 json.dumps(parsed_task.to_dict(), indent=2) + "\n", encoding="utf-8"
             )
+        if parsed_objective is not None:
+            (path / "objective_settings.json").write_text(
+                json.dumps(asdict(parsed_objective), indent=2) + "\n", encoding="utf-8"
+            )
         (path / "manifest.json").write_text(
             json.dumps(
                 {
                     "scene_name": scene_name,
                     "base_scene_hash": payload["base_scene_hash"],
                     "has_task_spec": parsed_task is not None,
+                    "has_objective_settings": parsed_objective is not None,
                 },
                 indent=2,
             )
@@ -104,30 +112,39 @@ class OptimizationTools:
         scene = Scene.from_dict(payload["base_scene"])
         job_id = uuid4().hex
         directory = Path(output_dir).resolve() if output_dir else self.runs_dir / job_id
-        runner = OptimizationRunner(directory, executor=self.executor)
+        objective_settings = payload.get("objective_settings")
+        runner = OptimizationRunner(
+            directory,
+            executor=self.executor,
+            metrics=(MetricPipeline(ObjectiveSettings(**objective_settings)) if objective_settings is not None else None),
+        )
         task_spec = TaskSpec.from_dict(payload["task_spec"]) if payload.get("task_spec") is not None else None
         future = self._pool.submit(runner.run, scene, plan, task_metrics=task_spec)
         with self._lock:
             self._jobs[job_id] = (future, directory)
         return {"job_id": job_id, "status": "running", "plan": plan_name, "output_dir": str(directory)}
 
+    def close(self) -> None:
+        """Release the serial optimization worker after a benchmark case completes."""
+        self._pool.shutdown(wait=True)
+
     def get_job(self, job_id: str) -> dict[str, Any]:
         """Return optimization progress or its terminal summary."""
         with self._lock:
             future, directory = self._jobs[job_id]
-        trials = len(list(directory.glob("trial_*"))) if directory.exists() else 0
+        trial_dirs = list(directory.glob("trial_*")) if directory.exists() else []
         if not future.done():
-            completed = [
-                self._read_trial(path)
-                for path in sorted(directory.glob("trial_*"))
-                if (path / "result.json").exists() and (path / "metrics.json").exists()
-            ]
+            completed = [self._read_trial(path) for path in sorted(trial_dirs) if self._trial_complete(path)]
+            active = [path for path in sorted(trial_dirs) if not self._trial_complete(path)]
             feasible = [item for item in completed if item["result"].get("feasible", False)]
             best = min(feasible, key=lambda item: item["result"]["objective"], default=None)
             return {
                 "job_id": job_id,
-                "status": "running",
-                "completed_trials": trials,
+                "status": "running" if trial_dirs else "queued",
+                "completed_trials": len(completed),
+                "active_trials": len(active),
+                "active_trial_numbers": [int(path.name.removeprefix("trial_")) for path in active],
+                "progress_tail": self._progress_tail(active[-1]) if active else [],
                 "best_trial": best,
                 "output_dir": str(directory),
             }
@@ -139,7 +156,7 @@ class OptimizationTools:
     def list_trials(self, job_id: str) -> list[dict[str, Any]]:
         """List completed trial summaries in numeric order."""
         directory = self._job_directory(job_id)
-        return [self._read_trial(path) for path in sorted(directory.glob("trial_*")) if (path / "result.json").exists()]
+        return [self._read_trial(path) for path in sorted(directory.glob("trial_*")) if self._trial_complete(path)]
 
     def get_trial(self, job_id: str, trial_number: int) -> dict[str, Any]:
         """Return one trial's parameters, result, and metrics."""
@@ -187,6 +204,14 @@ class OptimizationTools:
             plan,
             parameters=activate_parameters(base, plan.parameters, optimizer=plan.optimizer),
         )
+        enabled_paths = {item.path for item in plan.parameters if item.enabled}
+        active_paths = {item.path for item in effective.parameters}
+        inactive_paths = sorted(enabled_paths.difference(active_paths))
+        if inactive_paths:
+            raise ValueError(
+                "Enabled optimization parameters are not active for this scene: "
+                f"{inactive_paths}. Remove them or set enabled=false."
+            )
         active = len(distributions_for(effective))
         limit = 10 if plan.optimizer == "cmaes" else 15
         if active > limit:
@@ -198,17 +223,33 @@ class OptimizationTools:
         scene = json.loads((path / "scene.json").read_text(encoding="utf-8"))
         manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
         task_path = path / "task_spec.json"
+        objective_path = path / "objective_settings.json"
         return {
             "plan": plan,
             "scene_name": manifest["scene_name"],
             "base_scene": scene,
             "base_scene_hash": manifest["base_scene_hash"],
             "task_spec": json.loads(task_path.read_text(encoding="utf-8")) if task_path.exists() else None,
+            "objective_settings": (
+                json.loads(objective_path.read_text(encoding="utf-8")) if objective_path.exists() else None
+            ),
         }
 
     def _job_directory(self, job_id: str) -> Path:
         with self._lock:
             return self._jobs[job_id][1]
+
+    @staticmethod
+    def _trial_complete(path: Path) -> bool:
+        return all((path / name).exists() for name in ("parameters.json", "result.json", "metrics.json"))
+
+    @staticmethod
+    def _progress_tail(path: Path, limit: int = 5) -> list[dict[str, Any]]:
+        progress = path / "progress.jsonl"
+        if not progress.exists():
+            return []
+        lines = progress.read_text(encoding="utf-8").splitlines()[-limit:]
+        return [json.loads(line) for line in lines if line.strip()]
 
     @staticmethod
     def _read_trial(path: Path) -> dict[str, Any]:

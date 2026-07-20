@@ -43,10 +43,15 @@ class CoupledSimulationScheduler:
         contact_pairs: set[tuple[str, str]] = set()
         exchanges: list[CouplingExchange] = []
         if self.graph.enables("rigid-cloth") or scene.render.ground:
-            triangle_contacts, contact_pairs, rigid_cloth = self.rigid_cloth.solve(
-                scene, compiled, state_out, dt
-            )
-            exchanges.extend(rigid_cloth)
+            # Rigid-cloth uses position projections, so a single pass can leave a
+            # fast rigid body embedded in a thin cloth. Re-evaluate contacts after
+            # every projection; this is the numerical coupling iteration exposed
+            # by the scene settings.
+            for _ in range(scene.settings.coupling.iterations):
+                contacts, pairs, rigid_cloth = self.rigid_cloth.solve(scene, compiled, state_out, dt)
+                triangle_contacts += contacts
+                contact_pairs.update(pairs)
+                exchanges.extend(rigid_cloth)
         body_ids = {body: object_id for object_id, body in compiled.body_indices.items()}
         for fluid_id, solver in compiled.fluid_solvers.items():
             solver.step(state_in, state_out, compiled.control, compiled.contacts, dt)

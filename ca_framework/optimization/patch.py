@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from typing import Any, Mapping
 
 from ca_framework.scene.model import Scene
@@ -29,7 +30,7 @@ def apply_parameter_patch(
     Returns:
         A new scene with no mutable state shared with :paramref:`base_scene`.
     """
-    candidate = deepcopy(base_scene.to_dict())
+    candidate = json.loads(json.dumps(base_scene.to_dict()))
     for path, value in values.items():
         if specs is not None:
             try:
@@ -49,13 +50,19 @@ def _set_path(root: dict[str, Any], path: str, value: Any) -> None:
         raise ValueError(f"Invalid parameter path: {path!r}")
     current: Any = root
     for part in parts[:-1]:
-        if not isinstance(current, dict) or part not in current:
-            raise ValueError(f"Unknown parameter path: {path!r}")
-        current = current[part]
+        current = _path_child(current, part, path)
     leaf = parts[-1]
-    if not isinstance(current, dict) or leaf not in current:
+    if isinstance(current, dict):
+        if leaf not in current:
+            raise ValueError(f"Unknown parameter path: {path!r}")
+        existing = current[leaf]
+    elif isinstance(current, list):
+        index = _list_index(leaf, path)
+        if index >= len(current):
+            raise ValueError(f"Unknown parameter path: {path!r}")
+        existing = current[index]
+    else:
         raise ValueError(f"Unknown parameter path: {path!r}")
-    existing = current[leaf]
     if type(existing) is bool:
         valid_type = type(value) is bool
     elif type(existing) is int:
@@ -68,4 +75,26 @@ def _set_path(root: dict[str, Any], path: str, value: Any) -> None:
         raise ValueError(
             f"Parameter path {path!r} expects {type(existing).__name__}, got {type(value).__name__}"
         )
-    current[leaf] = value
+    if isinstance(current, dict):
+        current[leaf] = value
+    else:
+        current[_list_index(leaf, path)] = value
+
+
+def _path_child(current: Any, part: str, path: str) -> Any:
+    if isinstance(current, dict):
+        if part not in current:
+            raise ValueError(f"Unknown parameter path: {path!r}")
+        return current[part]
+    if isinstance(current, list):
+        index = _list_index(part, path)
+        if index >= len(current):
+            raise ValueError(f"Unknown parameter path: {path!r}")
+        return current[index]
+    raise ValueError(f"Unknown parameter path: {path!r}")
+
+
+def _list_index(part: str, path: str) -> int:
+    if not part.isdecimal():
+        raise ValueError(f"List path component must be a zero-based index in {path!r}")
+    return int(part)

@@ -158,7 +158,7 @@ class ObjectFluid(ObjectBase):
 
 @dataclass(slots=True)
 class ObjectContainer(ObjectBase):
-    """Compound container generated from a floor, four walls, and optional lid."""
+    """Compound container with its local origin at the interior floor center."""
 
     kind: Literal["container"] = "container"
     inner_size: Vec3 = (1.0, 1.0, 1.0)

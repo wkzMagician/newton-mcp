@@ -25,6 +25,7 @@ class ObjectiveSettings:
     max_fluid_mass_error: float = 0.1
     max_fluid_divergence: float = 10.0
     max_smoke_density_penetration: float = 0.1
+    max_liquid_cloth_penetration_fraction: float = 0.1
     max_cloth_edge_ratio: float = 2.0
     min_cloth_area_ratio: float = 0.05
     max_cloth_area_ratio: float = 4.0
@@ -32,6 +33,8 @@ class ObjectiveSettings:
     max_angular_impulse_balance_error: float = 0.05
     max_interface_velocity_residual: float = 10.0
     max_exchange_energy_error: float = 100.0
+    max_rigid_cloth_penetration: float = 0.02
+    minimum_coupling_contact_duration: Mapping[str, float] = field(default_factory=dict)
     metric_thresholds: Mapping[str, float] = field(default_factory=dict)
     metric_weights: Mapping[str, float] = field(default_factory=dict)
 
@@ -82,13 +85,24 @@ class MetricPipeline:
         physics_loss = sum(term.weight * _robust(term.value / max(term.threshold, 1.0e-12)) for term in terms)
         task_loss = sum(term.weight * _robust(term.value / max(term.threshold, 1.0e-12)) for term in task_terms)
         cost = math.log1p(runtime_sec / max(self.settings.reference_runtime_sec, 1.0e-12))
-        objective = (
+        raw_objective = (
             self.settings.task_weight * task_loss
             + self.settings.physics_weight * physics_loss
             + self.settings.cost_weight * cost
         )
+        # Keep every feasible value strictly below the infeasible range while
+        # preserving the ordering of feasible candidates.  Without this
+        # monotonic compression, a large but valid task loss can numerically
+        # exceed an infeasible candidate and teach the optimizer to prefer
+        # invalid physics.
+        objective = self.settings.infeasible_base * raw_objective / (1.0 + raw_objective)
         values = {term.name: term.value for term in (*terms, *task_terms)}
-        values.update(runtime_cost=cost, physics_loss=physics_loss, task_loss=task_loss)
+        values.update(
+            runtime_cost=cost,
+            physics_loss=physics_loss,
+            task_loss=task_loss,
+            raw_objective=raw_objective,
+        )
         return ObjectiveResult(
             feasible=True,
             objective=objective,
@@ -111,13 +125,14 @@ class MetricPipeline:
         for object_id, values in metrics.get("fluid", {}).items():
             finite = bool(values.get("finite", True))
             results.append(ConstraintResult(f"fluid.{object_id}.finite", 0.0 if finite else 1.0, 0.0, finite))
-            results.append(
-                _upper(
-                    f"fluid.{object_id}.divergence",
-                    float(values.get("peak_divergence", values.get("max_divergence", 0.0))),
-                    self.settings.max_fluid_divergence,
+            if values.get("divergence_constraint_applicable", True):
+                results.append(
+                    _upper(
+                        f"fluid.{object_id}.divergence",
+                        float(values.get("peak_divergence", values.get("max_divergence", 0.0))),
+                        self.settings.max_fluid_divergence,
+                    )
                 )
-            )
             if values.get("mass_conservation_applicable", True):
                 results.append(
                     _upper(
@@ -126,6 +141,16 @@ class MetricPipeline:
                         self.settings.max_fluid_mass_error,
                     )
                 )
+            if values.get("phase") == "liquid":
+                particle_count = max(int(values.get("particles", 0)), 1)
+                for cloth_id, count in values.get("cloth_penetration_count", {}).items():
+                    results.append(
+                        _upper(
+                            f"fluid.{object_id}.cloth.{cloth_id}.penetration_fraction",
+                            float(count) / particle_count,
+                            self.settings.max_liquid_cloth_penetration_fraction,
+                        )
+                    )
             for cloth_id, penetration in values.get("cloth_density_penetration", {}).items():
                 results.append(
                     _upper(
@@ -193,6 +218,23 @@ class MetricPipeline:
                     self.settings.max_exchange_energy_error,
                 )
             )
+        if "max_rigid_cloth_penetration" in coupling_metrics:
+            results.append(
+                _upper(
+                    "coupling.rigid_cloth_penetration",
+                    float(coupling_metrics["max_rigid_cloth_penetration"]),
+                    self.settings.max_rigid_cloth_penetration,
+                )
+            )
+        durations = coupling_metrics.get("contact_duration", {})
+        for pair, minimum in self.settings.minimum_coupling_contact_duration.items():
+            results.append(
+                _lower(
+                    f"coupling.contact_duration.{pair}",
+                    float(durations.get(pair, 0.0)),
+                    float(minimum),
+                )
+            )
         if coupling_metrics.get("coupling_nonconvergence", False):
             results.append(ConstraintResult("coupling.nonconvergence", 1.0, 0.0, False))
         return results
@@ -202,13 +244,14 @@ class MetricPipeline:
             MetricTerm("penetration", float(metrics.get("max_penetration", 0.0)), self.settings.max_penetration)
         ]
         for object_id, values in metrics.get("fluid", {}).items():
-            terms.append(
-                MetricTerm(
-                    f"fluid.{object_id}.divergence",
-                    float(values.get("peak_divergence", values.get("max_divergence", 0.0))),
-                    self.settings.max_fluid_divergence,
+            if values.get("divergence_constraint_applicable", True):
+                terms.append(
+                    MetricTerm(
+                        f"fluid.{object_id}.divergence",
+                        float(values.get("peak_divergence", values.get("max_divergence", 0.0))),
+                        self.settings.max_fluid_divergence,
+                    )
                 )
-            )
             if values.get("mass_conservation_applicable", True):
                 terms.append(
                     MetricTerm(
@@ -217,6 +260,16 @@ class MetricPipeline:
                         self.settings.max_fluid_mass_error,
                     )
                 )
+            if values.get("phase") == "liquid":
+                particle_count = max(int(values.get("particles", 0)), 1)
+                for cloth_id, count in values.get("cloth_penetration_count", {}).items():
+                    terms.append(
+                        MetricTerm(
+                            f"fluid.{object_id}.cloth.{cloth_id}.penetration_fraction",
+                            float(count) / particle_count,
+                            self.settings.max_liquid_cloth_penetration_fraction,
+                        )
+                    )
             for cloth_id, penetration in values.get("cloth_density_penetration", {}).items():
                 terms.append(
                     MetricTerm(
@@ -226,11 +279,72 @@ class MetricPipeline:
                     )
                 )
         for object_id, values in metrics.get("cloth", {}).items():
+            edge_ratio = float(values.get("max_edge_length_ratio", 1.0))
+            min_area_ratio = float(values.get("min_triangle_area_ratio", 1.0))
+            max_area_ratio = float(values.get("max_triangle_area_ratio", 1.0))
             terms.append(
                 MetricTerm(
                     f"cloth.{object_id}.residual_speed",
                     float(values.get("final_residual_speed", 0.0)),
                     float(self.settings.metric_thresholds.get("cloth_residual_speed", 1.0)),
+                )
+            )
+            terms.extend(
+                [
+                    MetricTerm(
+                        f"cloth.{object_id}.edge_distortion",
+                        max(0.0, edge_ratio - 1.0),
+                        max(self.settings.max_cloth_edge_ratio - 1.0, 1.0e-12),
+                    ),
+                    MetricTerm(
+                        f"cloth.{object_id}.area_distortion",
+                        max(1.0 - min_area_ratio, max_area_ratio - 1.0, 0.0),
+                        max(
+                            1.0 - self.settings.min_cloth_area_ratio,
+                            self.settings.max_cloth_area_ratio - 1.0,
+                            1.0e-12,
+                        ),
+                    ),
+                ]
+            )
+        if "impulse_balance_error" in metrics.get("coupling", {}):
+            terms.append(
+                MetricTerm(
+                    "coupling.impulse_balance_error",
+                    float(metrics["coupling"]["impulse_balance_error"]),
+                    self.settings.max_impulse_balance_error,
+                )
+            )
+        if "angular_impulse_balance_error" in metrics.get("coupling", {}):
+            terms.append(
+                MetricTerm(
+                    "coupling.angular_impulse_balance_error",
+                    float(metrics["coupling"]["angular_impulse_balance_error"]),
+                    self.settings.max_angular_impulse_balance_error,
+                )
+            )
+        if "interface_velocity_residual" in metrics.get("coupling", {}):
+            terms.append(
+                MetricTerm(
+                    "coupling.interface_velocity_residual",
+                    float(metrics["coupling"]["interface_velocity_residual"]),
+                    self.settings.max_interface_velocity_residual,
+                )
+            )
+        if "exchange_energy_error" in metrics.get("coupling", {}):
+            terms.append(
+                MetricTerm(
+                    "coupling.exchange_energy_error",
+                    float(metrics["coupling"]["exchange_energy_error"]),
+                    self.settings.max_exchange_energy_error,
+                )
+            )
+        if "max_rigid_cloth_penetration" in metrics.get("coupling", {}):
+            terms.append(
+                MetricTerm(
+                    "coupling.rigid_cloth_penetration",
+                    float(metrics["coupling"]["max_rigid_cloth_penetration"]),
+                    self.settings.max_rigid_cloth_penetration,
                 )
             )
         return terms

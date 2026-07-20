@@ -6,15 +6,22 @@
 from __future__ import annotations
 
 import json
+import multiprocessing as mp
+import pickle
+import queue
+import subprocess
+import sys
+import tempfile
 import time
 import uuid
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
-from threading import Event, Thread, Timer
+from threading import Event, Thread
 from typing import Any, Callable
 
 import numpy as np
+import warp as wp
 import optuna
 
 from ca_framework.metrics import MetricPipeline, ObjectiveResult, TaskSpec
@@ -22,7 +29,7 @@ from ca_framework.scene import Scene, SceneExecutorLocal, validate_scene
 
 from .model import OptimizationPlan
 from .fidelity import make_f1_scene
-from .optuna_backend import best_trial_payload, create_study, decode_parameters, distributions_for
+from .optuna_backend import best_trial_payload, create_study, decode_parameters, distributions_for, encode_parameters
 from .patch import apply_parameter_patch
 from .parameter_space import activate_parameters
 from .report import build_report
@@ -30,6 +37,21 @@ from .storage import OptimizationJob, OptimizationJobStore
 
 TaskMetricFunction = Callable[[Scene, dict[str, Any]], dict[str, float]]
 TaskMetrics = TaskMetricFunction | TaskSpec
+
+
+def _simulate_in_process(
+    executor: SceneExecutorLocal,
+    scene_payload: dict[str, Any],
+    frames: int | None,
+    capture_cache: bool,
+    result_queue: mp.Queue,
+) -> None:
+    """Run one simulation in a child process so timeout can be enforced."""
+    try:
+        scene = Scene.from_dict(scene_payload)
+        result_queue.put({"ok": True, "result": executor.simulate(scene, frames=frames, capture_cache=capture_cache)})
+    except BaseException as error:  # pragma: no cover - exercised through parent timeout/error path
+        result_queue.put({"ok": False, "error": f"{type(error).__name__}: {error}"})
 
 
 class OptimizationRunner:
@@ -68,7 +90,12 @@ class OptimizationRunner:
             (self.output_dir / "task_spec.json").write_text(
                 json.dumps(task_metrics.to_dict(), indent=2) + "\n", encoding="utf-8"
             )
-        effective_plan = replace(plan, parameters=activate_parameters(base_scene, plan.parameters, optimizer=plan.optimizer))
+        active_parameters = activate_parameters(base_scene, plan.parameters, optimizer=plan.optimizer)
+        active_paths = {item.path for item in active_parameters}
+        for parameters in plan.initial_parameters:
+            if set(parameters) != active_paths:
+                raise ValueError("Initial parameter candidates must define every active parameter")
+        effective_plan = replace(plan, parameters=active_parameters, initial_parameters=())
         study = create_study(effective_plan)
         study_started = time.monotonic()
         deadline = (
@@ -77,14 +104,21 @@ class OptimizationRunner:
             else None
         )
         distributions = distributions_for(effective_plan)
-        specs = {item.path: item for item in plan.parameters}
-        remaining_trials = max(0, plan.trials - len(study.trials))
+        specs = {item.path: item for item in effective_plan.parameters}
+        active_specs = {path: specs[path] for path in distributions}
+        if not study.trials:
+            for parameters in plan.initial_parameters:
+                study.enqueue_trial(encode_parameters(active_specs, parameters))
+        queued_trials = len(study.get_trials(states=(optuna.trial.TrialState.WAITING,)))
+        remaining_trials = max(0, plan.trials - len(study.trials)) + queued_trials
         for _ in range(remaining_trials):
             if deadline is not None and time.monotonic() >= deadline:
                 break
             trial = study.ask(fixed_distributions=distributions)
             trial_dir = self.output_dir / f"trial_{trial.number:05d}"
             trial_dir.mkdir(parents=True, exist_ok=False)
+            candidate = base_scene
+            parameters: dict[str, Any] = {}
             job_id = uuid.uuid4().hex
             started = time.time()
             self.jobs.create(
@@ -119,34 +153,57 @@ class OptimizationRunner:
                     self._finish_job(job_id, "failed", heartbeat_stop)
                     continue
 
-                f1_scene = make_f1_scene(candidate, plan.fidelity)
-                short_frames = max(1, round(f1_scene.settings.duration * f1_scene.settings.fps))
-                f1_started = time.perf_counter()
-                f1 = self._simulate_with_timeout(
-                    f1_scene,
-                    timeout_sec=self._effective_timeout(plan.timeout_sec, deadline),
-                    frames=short_frames,
-                    capture_cache=False,
-                )
-                f1_runtime = time.perf_counter() - f1_started
-                f1_objective = self.metrics.evaluate(f1, runtime_sec=f1_runtime)
-                if not f1_objective.feasible:
-                    self._write_trial(
-                        trial_dir, candidate, parameters, f1_objective, f1, f1.get("diagnostics", [])
+                f1_objective = None
+                if not (
+                    plan.fidelity.short_duration_fraction == 1.0
+                    and plan.fidelity.low_resolution_scale == 1.0
+                ):
+                    f1_scene = make_f1_scene(candidate, plan.fidelity)
+                    short_frames = max(1, round(f1_scene.settings.duration * f1_scene.settings.fps))
+                    f1_started = time.perf_counter()
+                    self._write_progress(trial_dir, "f1_started", {"frames": short_frames})
+                    f1 = self._simulate_with_timeout(
+                        f1_scene,
+                        timeout_sec=self._effective_timeout(plan.timeout_sec, deadline),
+                        frames=short_frames,
+                        capture_cache=False,
+                        log_dir=trial_dir / "logs",
+                        phase="f1",
                     )
-                    study.tell(trial, f1_objective.objective)
-                    self._finish_job(job_id, "pruned", heartbeat_stop)
-                    continue
+                    f1_runtime = time.perf_counter() - f1_started
+                    self._write_progress(trial_dir, "f1_finished", {"runtime_sec": f1_runtime})
+                    f1_objective = self.metrics.evaluate(f1, runtime_sec=f1_runtime)
+                else:
+                    self._write_progress(trial_dir, "f1_skipped", {"reason": "full_fidelity_equivalent"})
 
                 f2_started = time.perf_counter()
+                self._write_progress(trial_dir, "f2_started", {"frames": None})
                 f2 = self._simulate_with_timeout(
                     candidate,
                     timeout_sec=self._effective_timeout(plan.timeout_sec, deadline),
-                    capture_cache=True,
+                    # Search trials only need scalar simulation metrics.  The
+                    # representative finalist is simulated again by ``run``
+                    # with a durable cache for video rendering, so retaining
+                    # every substep here duplicates substantial work and data.
+                    capture_cache=False,
+                    log_dir=trial_dir / "logs",
+                    phase="f2",
                 )
                 runtime = time.perf_counter() - f2_started
+                self._write_progress(trial_dir, "f2_finished", {"runtime_sec": runtime})
                 task = self._evaluate_task(task_metrics, candidate, f2)
                 objective = self.metrics.evaluate(f2, runtime_sec=runtime, task_metrics=task)
+                if f1_objective is not None and not f1_objective.feasible:
+                    f2.setdefault("diagnostics", [])
+                    f2["diagnostics"] = [
+                        *f2["diagnostics"],
+                        {
+                            "code": "low_fidelity_infeasible",
+                            "message": "F1 low-fidelity evaluation was infeasible; F2 full-fidelity result was used.",
+                            "failure_reason": f1_objective.failure_reason,
+                            "objective": f1_objective.objective,
+                        },
+                    ]
                 self._write_trial(trial_dir, candidate, parameters, objective, f2, f2.get("diagnostics", []))
                 trial.set_user_attr("feasible", objective.feasible)
                 trial.set_user_attr("result_dir", str(trial_dir))
@@ -155,21 +212,46 @@ class OptimizationRunner:
                     job_id, "completed" if objective.feasible else "failed", heartbeat_stop
                 )
             except TimeoutError as error:
-                failure = {
-                    "status": "timeout",
-                    "failure_reason": str(error),
-                    "trial": trial.number,
-                }
-                (trial_dir / "result.json").write_text(json.dumps(failure, indent=2) + "\n", encoding="utf-8")
+                self._write_progress(trial_dir, "timeout", {"message": str(error)})
+                objective = ObjectiveResult(
+                    feasible=False,
+                    objective=self.metrics.settings.infeasible_base,
+                    metrics={},
+                    constraints={},
+                    runtime_sec=0.0,
+                    status="timeout",
+                    failure_reason=str(error),
+                )
+                self._write_trial(
+                    trial_dir,
+                    candidate,
+                    parameters,
+                    objective,
+                    None,
+                    [{"code": "optimization_timeout", "message": str(error)}],
+                )
                 study.tell(trial, state=optuna.trial.TrialState.FAIL)
                 self._finish_job(job_id, "timeout", heartbeat_stop)
             except Exception as error:
-                failure = {
-                    "status": "failed",
-                    "failure_reason": f"{type(error).__name__}: {error}",
-                    "trial": trial.number,
-                }
-                (trial_dir / "result.json").write_text(json.dumps(failure, indent=2) + "\n", encoding="utf-8")
+                message = f"{type(error).__name__}: {error}"
+                self._write_progress(trial_dir, "failed", {"message": message})
+                objective = ObjectiveResult(
+                    feasible=False,
+                    objective=self.metrics.settings.infeasible_base,
+                    metrics={},
+                    constraints={},
+                    runtime_sec=0.0,
+                    status="failed",
+                    failure_reason=message,
+                )
+                self._write_trial(
+                    trial_dir,
+                    candidate,
+                    parameters,
+                    objective,
+                    None,
+                    [{"code": "optimization_failed", "message": message}],
+                )
                 study.tell(trial, state=optuna.trial.TrialState.FAIL)
                 self._finish_job(job_id, "failed", heartbeat_stop)
         robust_scores = self._robust_recheck(
@@ -215,7 +297,10 @@ class OptimizationRunner:
             return []
         selected = []
         seen = set()
-        for key in ("best_feasible_trial", "fastest_acceptable_trial", "most_robust_trial"):
+        # Representative videos must not cherry-pick the best outcome.  Prefer the
+        # median feasible objective, then use the other report selections only when
+        # more than one finalist artifact was explicitly requested.
+        for key in ("median_feasible_trial", "best_feasible_trial", "fastest_acceptable_trial", "most_robust_trial"):
             trial = report.get(key)
             if trial is not None and trial["number"] not in seen:
                 selected.append(trial)
@@ -262,7 +347,9 @@ class OptimizationRunner:
                 simulation = self._simulate_with_timeout(
                     perturbed,
                     timeout_sec=self._effective_timeout(plan.timeout_sec, deadline),
-                    capture_cache=False,
+                    # Task evaluators may require per-frame state (for example,
+                    # settling metrics derived from early versus late velocity).
+                    capture_cache=task_metrics is not None,
                 )
                 runtime = time.perf_counter() - started
                 task = self._evaluate_task(task_metrics, perturbed, simulation)
@@ -285,33 +372,111 @@ class OptimizationRunner:
         timeout_sec: float | None,
         frames: int | None = None,
         capture_cache: bool,
+        log_dir: Path | None = None,
+        phase: str = "simulation",
     ) -> dict[str, Any]:
         if timeout_sec is None:
             return self.executor.simulate(scene, frames=frames, capture_cache=capture_cache)
-        cancel = Event()
-        timer = Timer(timeout_sec, cancel.set)
-        timer.start()
+        if type(self.executor) is SceneExecutorLocal:
+            return self._simulate_in_subprocess(
+                scene,
+                timeout_sec=timeout_sec,
+                frames=frames,
+                capture_cache=capture_cache,
+                log_dir=log_dir,
+                phase=phase,
+            )
+        context = mp.get_context("fork")
+        result_queue = context.Queue(maxsize=1)
+        process = context.Process(
+            target=_simulate_in_process,
+            args=(self.executor, scene.to_dict(), frames, capture_cache, result_queue),
+            daemon=True,
+        )
+        process.start()
+        process.join(timeout_sec)
+        if process.is_alive():
+            process.terminate()
+            process.join(5.0)
+            if process.is_alive():
+                process.kill()
+                process.join()
+            raise TimeoutError(f"Simulation exceeded {timeout_sec:g} seconds")
         try:
-            try:
-                result = self.executor.simulate(
-                    scene,
-                    frames=frames,
-                    capture_cache=capture_cache,
-                    cancel_event=cancel,
+            message = result_queue.get_nowait()
+        except queue.Empty as error:
+            raise RuntimeError(f"Simulation process exited with code {process.exitcode}") from error
+        if message["ok"]:
+            return message["result"]
+        raise RuntimeError(message["error"])
+
+    def _simulate_in_subprocess(
+        self,
+        scene: Scene,
+        *,
+        timeout_sec: float,
+        frames: int | None,
+        capture_cache: bool,
+        log_dir: Path | None,
+        phase: str,
+    ) -> dict[str, Any]:
+        with tempfile.TemporaryDirectory(prefix="ca-opt-sim-", dir=self.output_dir) as directory:
+            work = Path(directory)
+            input_path = work / "input.pkl"
+            output_path = work / "output.pkl"
+            input_path.write_bytes(
+                pickle.dumps(
+                    {
+                        "scene": scene.to_dict(),
+                        "frames": frames,
+                        "capture_cache": capture_cache,
+                        "device": str(wp.get_device()),
+                    }
                 )
-            except TypeError as error:
-                if "cancel_event" not in str(error):
-                    raise
-                result = self.executor.simulate(scene, frames=frames, capture_cache=capture_cache)
-            if cancel.is_set():
-                raise TimeoutError(f"Simulation exceeded {timeout_sec:g} seconds")
-            return result
-        except Exception:
-            if cancel.is_set():
-                raise TimeoutError(f"Simulation exceeded {timeout_sec:g} seconds") from None
-            raise
-        finally:
-            timer.cancel()
+            )
+            code = (
+                "import pickle, sys\n"
+                "from pathlib import Path\n"
+                "import warp as wp\n"
+                "from ca_framework.scene import Scene, SceneExecutorLocal\n"
+                "payload = pickle.loads(Path(sys.argv[1]).read_bytes())\n"
+                "wp.set_device(payload['device'])\n"
+                "scene = Scene.from_dict(payload['scene'])\n"
+                "result = SceneExecutorLocal().simulate(\n"
+                "    scene,\n"
+                "    frames=payload['frames'],\n"
+                "    capture_cache=payload['capture_cache'],\n"
+                ")\n"
+                "Path(sys.argv[2]).write_bytes(pickle.dumps(result))\n"
+            )
+            try:
+                stdout = subprocess.DEVNULL
+                stderr = subprocess.DEVNULL
+                stdout_file = None
+                stderr_file = None
+                if log_dir is not None:
+                    log_dir.mkdir(parents=True, exist_ok=True)
+                    stdout_file = (log_dir / f"{phase}.stdout.log").open("w", encoding="utf-8")
+                    stderr_file = (log_dir / f"{phase}.stderr.log").open("w", encoding="utf-8")
+                    stdout = stdout_file
+                    stderr = stderr_file
+                subprocess.run(
+                    [sys.executable, "-c", code, str(input_path), str(output_path)],
+                    check=True,
+                    timeout=timeout_sec,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            except subprocess.TimeoutExpired as error:
+                raise TimeoutError(f"Simulation exceeded {timeout_sec:g} seconds") from error
+            except subprocess.CalledProcessError as error:
+                raise RuntimeError(f"Simulation process failed with code {error.returncode}") from error
+            finally:
+                if stdout_file is not None:
+                    stdout_file.close()
+                if stderr_file is not None:
+                    stderr_file.close()
+            return pickle.loads(output_path.read_bytes())
 
     @staticmethod
     def _effective_timeout(timeout_sec: float | None, deadline: float | None) -> float | None:
@@ -360,12 +525,11 @@ class OptimizationRunner:
             failed.append(job.trial_number)
         return failed
 
-    @staticmethod
-    def _static_failure(report: dict[str, Any]) -> ObjectiveResult:
+    def _static_failure(self, report: dict[str, Any]) -> ObjectiveResult:
         count = sum(item["severity"] == "error" for item in report["diagnostics"])
         return ObjectiveResult(
             feasible=False,
-            objective=1000.0 * (1.0 + count),
+            objective=self.metrics.settings.infeasible_base * (1.0 + count),
             metrics={},
             constraints={"static_validation_errors": float(count)},
             runtime_sec=0.0,
@@ -387,6 +551,11 @@ class OptimizationRunner:
         (directory / "metrics.json").write_text(
             json.dumps(objective.to_dict(), indent=2) + "\n", encoding="utf-8"
         )
+        if simulation is not None:
+            simulation_metrics = {"simulation_device": str(wp.get_device()), **simulation.get("metrics", {})}
+            (directory / "simulation_metrics.json").write_text(
+                json.dumps(simulation_metrics, indent=2) + "\n", encoding="utf-8"
+            )
         (directory / "diagnostics.jsonl").write_text(
             "".join(json.dumps(item, sort_keys=True) + "\n" for item in diagnostics), encoding="utf-8"
         )
@@ -440,3 +609,9 @@ class OptimizationRunner:
             for key, value in frame.items()
         }
         np.savez_compressed(telemetry_dir / "frames.npz", **arrays)
+
+    @staticmethod
+    def _write_progress(directory: Path, event: str, payload: dict[str, Any]) -> None:
+        entry = {"time": time.time(), "event": event, **payload}
+        with (directory / "progress.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(entry, sort_keys=True) + "\n")

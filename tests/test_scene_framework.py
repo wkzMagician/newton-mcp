@@ -296,7 +296,18 @@ class TestSceneFramework(unittest.TestCase):
                         "kind": "container",
                         "motion": "static",
                         "inner_size": [2.0, 2.0, 1.0],
-                        "transform": {"position": [10.0, 0.0, 1.0], "scale": [2.0, 1.0, 1.0]},
+                        "transform": {
+                            "position": [10.0, 0.0, 1.0],
+                            "rotation": [0.0, 0.0, 0.3826834, 0.9238795],
+                            "scale": [2.0, 1.0, 1.0],
+                        },
+                    },
+                    "water": {
+                        "id": "water",
+                        "kind": "fluid",
+                        "phase": "liquid",
+                        "grid_resolution": [8, 8, 8],
+                        "particle_spacing": 0.1,
                     },
                 },
             }
@@ -305,6 +316,49 @@ class TestSceneFramework(unittest.TestCase):
         self.assertEqual(compiled.cloth_particle_indices["cloth"], list(range(6)))
         self.assertEqual(compiled.pinned_particles["cloth"], [3, 4, 5])
         self.assertAlmostEqual(compiled.container_colliders["container"][0]["position"][0], 10.0)
+        fluid_solver = compiled.fluid_solvers["water"]
+        self.assertTrue(
+            all(
+                tuple(boundary.rotation or ()) == (0.0, 0.0, 0.3826834, 0.9238795)
+                for boundary in fluid_solver.boundaries
+            )
+        )
+
+    def test_static_rotated_apic_boundary_rotates_solid_mask(self):
+        scene = Scene.from_dict(
+            {
+                "name": "static-rotated-liquid-boundary",
+                "objects": {
+                    "barrier": {
+                        "id": "barrier",
+                        "kind": "rigid",
+                        "motion": "static",
+                        "shape": "box",
+                        "size": [3.0, 0.3, 0.3],
+                        "transform": {"rotation": [0.0, 0.0, 0.70710678, 0.70710678]},
+                    },
+                    "water": {
+                        "id": "water",
+                        "kind": "fluid",
+                        "phase": "liquid",
+                        "size": [4.0, 4.0, 2.0],
+                        "grid_resolution": [32, 32, 16],
+                        "particle_spacing": 0.2,
+                    },
+                },
+                "render": {"ground": False},
+            }
+        )
+        compiled = SceneCompilerNewton().compile(scene)
+        fluid = compiled.fluid_solvers["water"]
+        fluid._build_solid_mask(compiled.state_0)
+
+        def is_solid_at(position: tuple[float, float, float]) -> bool:
+            index = np.floor((np.asarray(position) - fluid.domain_min) / fluid.cell_size).astype(int)
+            return bool(fluid.solid[tuple(index)])
+
+        self.assertTrue(is_solid_at((0.0625, 0.8125, 0.0625)))
+        self.assertFalse(is_solid_at((0.8125, 0.0625, 0.0625)))
 
     def test_kinematic_keyframes_interpolate_collision_shape_scale(self):
         scene = Scene.from_dict(
@@ -426,6 +480,7 @@ class TestSceneFramework(unittest.TestCase):
         self.assertTrue(stats["finite"])
         self.assertGreater(stats["density_mass"], 0.0)
         self.assertGreater(stats["occupied_cells"], 0)
+        self.assertNotIn("container_retention_fraction", stats)
 
     def test_smoke_drag_returns_balanced_impulse_to_rigid_body(self):
         scene = Scene.from_dict(

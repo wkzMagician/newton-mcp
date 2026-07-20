@@ -4,7 +4,7 @@
 """Parameter-space primitives for reproducible scene optimization."""
 
 from .model import FidelitySettings, OptimizationPlan, ParameterSpec
-from .orchestrator import run_two_stage
+from .orchestrator import run_optimizer_suite
 from .parameter_space import activate_parameters
 from .patch import apply_parameter_patch
 from .runner import OptimizationRunner
@@ -16,5 +16,5 @@ __all__ = [
     "ParameterSpec",
     "apply_parameter_patch",
     "activate_parameters",
-    "run_two_stage",
+    "run_optimizer_suite",
 ]

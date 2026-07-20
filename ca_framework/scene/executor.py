@@ -15,7 +15,7 @@ import tempfile
 import time
 from contextlib import suppress
 from pathlib import Path
-from threading import Event
+from threading import Event, local
 from typing import Any
 
 import numpy as np
@@ -66,6 +66,31 @@ _PHYSICS_FAILURE_CODES = frozenset(
         "coupling_nonconvergence",
     }
 )
+
+
+_HEADLESS_RENDERERS = local()
+
+
+def _headless_renderer(scene: Any, width: int, height: int) -> tuple[Any, Any]:
+    """Return a thread-local renderer session for one immutable scene."""
+    from newton.viewer import ViewerFluidGL  # noqa: PLC0415
+
+    renderers = getattr(_HEADLESS_RENDERERS, "by_scene", None)
+    if renderers is None:
+        renderers = {}
+        _HEADLESS_RENDERERS.by_scene = renderers
+    key = (width, height, json.dumps(scene.to_dict(), sort_keys=True, separators=(",", ":")))
+    if key not in renderers:
+        compiled = SceneCompilerNewton().compile(scene)
+        # Viewer.set_model() snapshots render geometry immediately.  Hide
+        # transparent container collision walls before that snapshot; changing
+        # model.shape_scale afterwards leaves the already-populated wall meshes
+        # visible and can occlude the entire scene.
+        SceneExecutorLocal._hide_transparent_container_faces(scene, compiled)
+        viewer = ViewerFluidGL(width=width, height=height, headless=True)
+        viewer.set_model(compiled.model)
+        renderers[key] = (viewer, compiled)
+    return renderers[key]
 
 
 def _preview_recommended_actions(result: dict[str, Any]) -> list[str]:
@@ -163,6 +188,8 @@ class SceneExecutorLocal:
         telemetry = SimulationTelemetry()
         divergence_history: dict[str, list[float]] = {key: [] for key in compiled.fluid_solvers}
         fluid_mass_history: dict[str, list[float]] = {key: [] for key in compiled.fluid_solvers}
+        fluid_centroid_history: dict[str, list[np.ndarray]] = {key: [] for key in compiled.fluid_solvers}
+        fluid_spatial_extent_history: dict[str, list[float]] = {key: [] for key in compiled.fluid_solvers}
         cloth_quality_history: dict[str, list[dict[str, Any]]] = {key: [] for key in compiled.cloth_particle_indices}
         max_body_linear_speed = 0.0
         max_body_angular_speed = 0.0
@@ -172,6 +199,7 @@ class SceneExecutorLocal:
         max_impulse_balance_error = 0.0
         max_angular_impulse_balance_error = 0.0
         max_exchange_energy_error = 0.0
+        max_rigid_cloth_penetration = 0.0
         coupling_contact_times: dict[str, tuple[float, float]] = {}
         state_in, state_out = compiled.state_0, compiled.state_1
         coupling_scheduler = CoupledSimulationScheduler(scene, self._triangle_shape_correction, self._copy_array)
@@ -290,6 +318,13 @@ class SceneExecutorLocal:
                     max_exchange_energy_error,
                     max((item.exchange_energy_error for item in substep_exchanges), default=0.0),
                 )
+                max_rigid_cloth_penetration = max(
+                    max_rigid_cloth_penetration,
+                    max(
+                        (item.penetration for item in substep_exchanges if item.pair_type == "rigid-cloth"),
+                        default=0.0,
+                    ),
+                )
                 for exchange in substep_exchanges:
                     key = f"{exchange.pair_type}:{exchange.object_a}|{exchange.object_b}"
                     first, _last = coupling_contact_times.get(key, (time_value, time_value))
@@ -348,6 +383,12 @@ class SceneExecutorLocal:
                     frame_state[f"{object_id}_velocities"] = solver.particle_velocity[: solver.particle_count].copy()
                     frame_state[f"{object_id}_masses"] = solver.particle_mass[: solver.particle_count].copy()
                     fluid_mass_history[object_id].append(float(frame_state[f"{object_id}_masses"].sum()))
+                    positions = frame_state[f"{object_id}_particles"]
+                    if positions.size:
+                        fluid_centroid_history[object_id].append(positions.mean(axis=0))
+                        fluid_spatial_extent_history[object_id].append(
+                            float(np.linalg.norm(np.ptp(positions, axis=0)))
+                        )
                 divergence = solver.divergence.numpy() if hasattr(solver.divergence, "numpy") else solver.divergence
                 divergence_history[object_id].append(float(np.max(np.abs(divergence), initial=0.0)))
             if capture_cache:
@@ -395,8 +436,11 @@ class SceneExecutorLocal:
                     fluid_solver.capacity_overflow = False
                 divergence = getattr(fluid_solver, "divergence", None)
                 divergence_values = divergence.numpy() if hasattr(divergence, "numpy") else divergence
+                fluid_object = scene.objects.get(object_id)
+                has_emitters = isinstance(fluid_object, ObjectFluid) and bool(fluid_object.emitters)
                 if divergence_values is not None and (
-                    not np.isfinite(divergence_values).all() or np.max(np.abs(divergence_values)) > 100.0
+                    not np.isfinite(divergence_values).all()
+                    or (not has_emitters and np.max(np.abs(divergence_values)) > 100.0)
                 ):
                     diagnostics.append(
                         {
@@ -471,14 +515,34 @@ class SceneExecutorLocal:
                 mass_samples = fluid_mass_history[object_id]
                 initial_mass = mass_samples[0] if mass_samples else 0.0
                 final_mass = mass_samples[-1] if mass_samples else 0.0
+                centroids = fluid_centroid_history[object_id]
                 stats.update(
                     initial_mass=initial_mass,
                     final_mass=final_mass,
                     relative_mass_change=(final_mass - initial_mass) / initial_mass if initial_mass > 0.0 else 0.0,
                     divergence_history=divergence_history[object_id],
                     peak_divergence=max(divergence_history[object_id], default=0.0),
+                    # A source injects particles and velocity directly into the
+                    # grid, so the global peak includes the source term and is
+                    # not an incompressibility residual.  Keep reporting it for
+                    # diagnostics, but do not use it as a hard constraint.
+                    divergence_constraint_applicable=not item.emitters,
                     mass_conservation_applicable=not item.emitters,
                 )
+                if centroids:
+                    stats.update(
+                        initial_centroid=centroids[0].tolist(),
+                        final_centroid=centroids[-1].tolist(),
+                        centroid_displacement=float(np.linalg.norm(centroids[-1] - centroids[0])),
+                        max_spatial_extent=max(fluid_spatial_extent_history[object_id], default=0.0),
+                    )
+                if item.phase == "liquid":
+                    final_positions = solver.particle_position[: solver.particle_count]
+                    stats["container_retention_fraction"] = {
+                        container.id: self._container_retention_fraction(final_positions, container)
+                        for container in scene.objects.values()
+                        if isinstance(container, ObjectContainer)
+                    }
                 fluid_stats[object_id] = stats
         cloth_stats = {}
         final_particle_q = state_in.particle_q.numpy() if state_in.particle_q is not None else np.empty((0, 3))
@@ -553,6 +617,8 @@ class SceneExecutorLocal:
                     "max_body_linear_speed": max_body_linear_speed,
                     "max_body_angular_speed": max_body_angular_speed,
                     "max_particle_speed": max_particle_speed,
+                    **self._layout_metrics(scene, trajectories),
+                    **self._orientation_metrics(scene, compiled, state_in),
                 },
                 "coupling": {
                     "exchange_count": coupling_exchange_count,
@@ -560,6 +626,7 @@ class SceneExecutorLocal:
                     "impulse_balance_error": max_impulse_balance_error,
                     "angular_impulse_balance_error": max_angular_impulse_balance_error,
                     "exchange_energy_error": max_exchange_energy_error,
+                    "max_rigid_cloth_penetration": max_rigid_cloth_penetration,
                     "contact_duration": {key: last - first for key, (first, last) in coupling_contact_times.items()},
                     "coupling_iterations": scene.settings.coupling.iterations,
                     "coupling_nonconvergence": (
@@ -745,6 +812,28 @@ class SceneExecutorLocal:
             "max_triangle_area_ratio": float(area_ratios.max(initial=1.0)),
             "flipped_triangle_count": int(np.count_nonzero(flipped)),
         }
+
+    @staticmethod
+    def _container_retention_fraction(positions: np.ndarray, container: ObjectContainer) -> float:
+        """Return the final particle fraction inside one container's inner volume."""
+        points = np.asarray(positions, dtype=np.float64)
+        if points.size == 0:
+            return 0.0
+        relative = points - np.asarray(container.transform.position, dtype=np.float64)
+        qx, qy, qz, qw = container.transform.rotation
+        inverse_vector = np.asarray((-qx, -qy, -qz), dtype=np.float64)
+        twice_cross = 2.0 * np.cross(inverse_vector, relative)
+        local = relative + qw * twice_cross + np.cross(inverse_vector, twice_cross)
+        scale = np.asarray(container.transform.scale, dtype=np.float64)
+        local = np.divide(local, scale, out=np.zeros_like(local), where=scale != 0.0)
+        inner = np.asarray(container.inner_size, dtype=np.float64)
+        inside = (
+            (np.abs(local[:, 0]) <= inner[0] * 0.5)
+            & (np.abs(local[:, 1]) <= inner[1] * 0.5)
+            & (local[:, 2] >= 0.0)
+            & (local[:, 2] <= inner[2])
+        )
+        return float(np.mean(inside))
 
     @staticmethod
     def _copy_array(destination: Any, values: np.ndarray) -> None:
@@ -964,6 +1053,79 @@ class SceneExecutorLocal:
             else:
                 position = np.asarray(item.transform.position)
             trajectories[object_id].append([round(float(value), 8) for value in position])
+
+    @staticmethod
+    def _layout_metrics(scene: Scene, trajectories: dict[str, Any]) -> dict[str, Any]:
+        """Return generic final-position and pair-distance task measurements [m]."""
+        positions: dict[str, np.ndarray] = {}
+        final_position: dict[str, dict[str, float]] = {}
+        displacement: dict[str, float] = {}
+        supported = (ObjectRigid, ObjectContainer, ObjectCloth)
+        for object_id, item in scene.objects.items():
+            samples = trajectories.get(object_id, [])
+            if not isinstance(item, supported) or not samples:
+                continue
+            initial = np.asarray(samples[0], dtype=float)
+            final = np.asarray(samples[-1], dtype=float)
+            positions[object_id] = final
+            final_position[object_id] = {
+                "x": float(final[0]),
+                "y": float(final[1]),
+                "z": float(final[2]),
+            }
+            displacement[object_id] = float(np.linalg.norm(final - initial))
+
+        pair_distance: dict[str, float] = {}
+        pair_horizontal_distance: dict[str, float] = {}
+        object_ids = sorted(positions)
+        for index, object_a in enumerate(object_ids):
+            for object_b in object_ids[index + 1 :]:
+                key = f"{object_a}|{object_b}"
+                delta = positions[object_b] - positions[object_a]
+                pair_distance[key] = float(np.linalg.norm(delta))
+                pair_horizontal_distance[key] = float(np.linalg.norm(delta[:2]))
+        return {
+            "final_body_position": final_position,
+            "body_displacement": displacement,
+            "final_body_pair_distance": pair_distance,
+            "final_body_pair_horizontal_distance": pair_horizontal_distance,
+        }
+
+    @staticmethod
+    def _orientation_metrics(scene: Scene, compiled: Any, state: Any) -> dict[str, Any]:
+        """Return generic final orientation and speed measurements for rigid bodies."""
+        body_q = state.body_q.numpy() if state.body_q is not None else np.empty((0, 7))
+        body_qd = state.body_qd.numpy() if state.body_qd is not None else np.empty((0, 6))
+        alignment: dict[str, float] = {}
+        tilt_angle: dict[str, float] = {}
+        linear_speed: dict[str, float] = {}
+        angular_speed: dict[str, float] = {}
+        for object_id, item in scene.objects.items():
+            if not isinstance(item, (ObjectRigid, ObjectContainer)):
+                continue
+            if object_id in compiled.body_indices:
+                body_index = compiled.body_indices[object_id]
+                quaternion = np.asarray(body_q[body_index, 3:7], dtype=float)
+                velocity = np.asarray(body_qd[body_index], dtype=float)
+                linear_speed[object_id] = float(np.linalg.norm(velocity[:3]))
+                angular_speed[object_id] = float(np.linalg.norm(velocity[3:]))
+            else:
+                quaternion = np.asarray(item.transform.rotation, dtype=float)
+                linear_speed[object_id] = 0.0
+                angular_speed[object_id] = 0.0
+            norm = float(np.linalg.norm(quaternion))
+            if norm <= 1.0e-12 or not math.isfinite(norm):
+                continue
+            x, y, _, _ = quaternion / norm
+            up_alignment = float(np.clip(1.0 - 2.0 * (x * x + y * y), -1.0, 1.0))
+            alignment[object_id] = up_alignment
+            tilt_angle[object_id] = float(math.acos(up_alignment))
+        return {
+            "final_body_up_alignment": alignment,
+            "final_body_tilt_angle": tilt_angle,
+            "final_body_linear_speed": linear_speed,
+            "final_body_angular_speed": angular_speed,
+        }
 
     @staticmethod
     def _state_diagnostic(state: Any, frame_index: int) -> dict[str, Any] | None:
@@ -1598,17 +1760,15 @@ class SceneExecutorLocal:
     def _render_cache_frames_gl(scene: Scene, frame_paths: list[Path], output_dir: Path) -> dict[str, Any]:
         """Replay cache through the hardware OpenGL viewer."""
         device = wp.get_device()
-        viewer = None
         try:
             from newton.viewer import (  # noqa: PLC0415
                 RendererFluidScreenSpace,
                 RendererSmokeVolume,
-                ViewerFluidGL,
             )
 
-            compiled = SceneCompilerNewton().compile(scene)
             width, height = scene.render.resolution
-            viewer = ViewerFluidGL(width=width, height=height, headless=True)
+            viewer, compiled = _headless_renderer(scene, width, height)
+            viewer.clear_post_render_callbacks()
             from pyglet import gl
 
             def gl_string(name) -> str:
@@ -1622,7 +1782,6 @@ class SceneExecutorLocal:
                 raise RuntimeError(f"Hardware OpenGL is required; detected software renderer: {gl_renderer}")
             camera = scene.render.camera
             SceneExecutorLocal._hide_transparent_container_faces(scene, compiled)
-            viewer.set_model(compiled.model)
             if camera.position is not None and camera.target is not None:
                 position = np.asarray(camera.position, dtype=float)
                 direction = np.asarray(camera.target, dtype=float) - position
@@ -1709,10 +1868,6 @@ class SceneExecutorLocal:
                 f"Hardware OpenGL rendering unavailable ({type(exc).__name__}: {exc}). "
                 "Pass through a graphics device and matching GPU driver; software rendering is not supported."
             ) from exc
-        finally:
-            if viewer is not None:
-                with suppress(Exception):
-                    viewer.close()
 
     @staticmethod
     def _set_auto_camera(viewer: Any, scene: Scene) -> None:

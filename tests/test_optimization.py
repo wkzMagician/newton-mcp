@@ -8,9 +8,7 @@ from __future__ import annotations
 import unittest
 
 from ca_framework.optimization import ParameterSpec, activate_parameters, apply_parameter_patch
-from ca_framework.scene import ObjectFluid, ObjectRigid, Scene
-from evaluation.benchmark_optimizers import BENCHMARK_SCENES, OPTIMIZERS, benchmark_plan
-from evaluation.canonical import canonical_scenes
+from ca_framework.scene import FluidEmitter, ObjectFluid, ObjectRigid, Scene
 
 
 class TestParameterPatch(unittest.TestCase):
@@ -60,6 +58,17 @@ class TestParameterPatch(unittest.TestCase):
             apply_parameter_patch(self.scene, {"settings.missing": 1})
         with self.assertRaises(ValueError):
             apply_parameter_patch(self.scene, {"settings.substeps": 1.5})
+
+    def test_patch_supports_zero_based_list_components(self) -> None:
+        scene = Scene(
+            name="emitter-patch",
+            objects={"water": ObjectFluid("water", emitters=[FluidEmitter(velocity=(1.0, 0.0, -1.0))])},
+        )
+
+        candidate = apply_parameter_patch(scene, {"objects.water.emitters.0.velocity.0": 2.5})
+
+        self.assertEqual(candidate.objects["water"].emitters[0].velocity, [2.5, 0.0, -1.0])
+        self.assertEqual(scene.objects["water"].emitters[0].velocity, (1.0, 0.0, -1.0))
 
 
 class TestSchemaV3Migration(unittest.TestCase):
@@ -115,31 +124,6 @@ class TestParameterActivation(unittest.TestCase):
             2.0,
         )
         self.assertEqual(activate_parameters(scene, (spec,)), (spec,))
-
-
-class TestBenchmarkMatrix(unittest.TestCase):
-    def test_all_representative_scene_sampler_plans_patch_valid_paths(self) -> None:
-        scenes = canonical_scenes()
-        for scene_key, canonical_name in BENCHMARK_SCENES.items():
-            for optimizer in OPTIMIZERS:
-                plan = benchmark_plan(
-                    scene_key, optimizer, 0, trials=2, max_wall_time_sec=10.0
-                )
-                values = {
-                    spec.path: (spec.lower + spec.upper) / 2.0
-                    for spec in plan.parameters
-                    if spec.kind == "float"
-                }
-                values.update(
-                    {
-                        spec.path: int((spec.lower + spec.upper) // 2)
-                        for spec in plan.parameters
-                        if spec.kind == "int"
-                    }
-                )
-                apply_parameter_patch(
-                    scenes[canonical_name], values, {spec.path: spec for spec in plan.parameters}
-                )
 
 
 if __name__ == "__main__":

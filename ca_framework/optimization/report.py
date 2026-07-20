@@ -42,6 +42,10 @@ def build_report(
         )
     feasible = [item for item in trials if item["feasible"]]
     best = min(feasible, key=lambda item: item["objective"], default=None)
+    median = None
+    if feasible:
+        ordered_feasible = sorted(feasible, key=lambda item: (item["objective"], item["number"]))
+        median = ordered_feasible[(len(ordered_feasible) - 1) // 2]
     acceptable = [item for item in feasible if item["objective"] <= acceptable_objective]
     fastest = min(acceptable, key=lambda item: item["runtime_sec"], default=None)
     robust_scores = robust_scores or {}
@@ -69,6 +73,7 @@ def build_report(
         violation_history.append(0.0 if item["feasible"] else max(0.0, item["objective"] - 1000.0))
     report = {
         "best_feasible_trial": best,
+        "median_feasible_trial": median,
         "fastest_acceptable_trial": fastest,
         "most_robust_trial": robust,
         "optimization_history": best_so_far,

@@ -113,7 +113,17 @@ class SceneTools:
                 "liquid": "apic",
             },
             "actions": ["transform", "impulse", "force", "emit"],
+            "optimization_parameter_paths": {
+                "syntax": "dot-separated scene path; zero-based list components are numeric",
+                "example": "objects.water.emitters.0.velocity.0",
+            },
             "outputs": ["mp4", "scene-json", "python", "metrics", "diagnostics"],
+            "workflow_tools": {
+                "validate": "validate_scene",
+                "preview": "preview_scene",
+                "final_bundle": "run_scene",
+                "job_status": "get_job",
+            },
             "camera": {"modes": ["auto", "look-at"], "supports_up": True},
             "recommended_simulation": {
                 "rigid": {"fps": [30, 60], "substeps": [4, 12]},

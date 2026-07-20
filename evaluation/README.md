@@ -1,9 +1,9 @@
 # Prompt-to-video evaluation
 
-This directory is the evaluation boundary. It contains reference scenes,
-acceptance assertions, benchmark launchers, and generated results. It is not
-included in the Newton wheel and must not be mounted in an agent's working
-directory during an experiment.
+This directory is the evaluation boundary. It contains black-box task prompts,
+benchmark launchers, and generated results. It is not included in the Newton
+wheel and must not be mounted in an agent's working directory during an
+experiment.
 
 The agent-facing surface consists only of:
 
@@ -14,47 +14,8 @@ The agent-facing surface consists only of:
 
 The evaluator owns `evaluation/`, starts a fresh agent conversation for every
 prompt, assigns an independent scene workspace and result directory, and scores
-the artifacts only after the agent exits. Never copy reference scenes, expected
-metrics, prior results, or this directory into an agent workspace.
-
-## Run the hidden canonical acceptance suite
-
-From the repository root:
-
-```bash
-export WARP_CACHE_ROOT=/tmp/newton-warp-cache-$$
-uv run --extra dev -m unittest evaluation.tests.test_canonical_scenes
-```
-
-Run all twelve reference scenes and write complete bundles beneath the ignored
-`evaluation/results/canonical/` directory:
-
-```bash
-uv run -m evaluation.run_canonical
-```
-
-Freeze deterministic schema-v3 baseline evidence (scene, metrics,
-diagnostics, trajectory hash, device, Warp version, seed, and wall time):
-
-```bash
-uv run -m evaluation.freeze_baseline evaluation/baselines/schema_v3
-```
-
-Compare frozen pre-refactor and migrated post-refactor evidence using the
-explicit penetration, cloth-quality, mass, and divergence tolerances:
-
-```bash
-uv run -m evaluation.compare_baselines \
-  evaluation/baselines/schema_v2 \
-  evaluation/baselines/schema_v3_migrated_v2 \
-  --output evaluation/baselines/comparison.json
-```
-
-Run one scene:
-
-```bash
-uv run -m evaluation.run_canonical --scene 08_liquid_pour
-```
+the artifacts only after the agent exits. Never copy prior results or this
+directory into an agent workspace.
 
 ## Start an uncontaminated agent
 
@@ -85,11 +46,11 @@ configuration per run so `CA_SCENE_WORKSPACE` cannot leak scenes between runs.
 Only install the generic skills from `knowledge/skills`; do not create a skill
 that imports or describes anything in this directory.
 
-## Run ten black-box agent experiments
+## Run the 12-case black-box baselines
 
-The ten natural-language tasks in `evaluation/agent_prompts.py` describe the
-observable outcomes of the canonical scenes without exposing their Scene IR,
-numeric acceptance assertions, or reference artifacts. The runner starts a
+The private natural-language tasks in `evaluation/agent_prompts.py` describe
+observable outcomes without exposing evaluator IR, numeric acceptance
+assertions, or reference artifacts. The runner starts a
 fresh `codex exec --ephemeral` process for every task and gives it independent
 Codex configuration, scene storage, workspace, and output directories.
 
@@ -100,11 +61,40 @@ uv run -m evaluation.run_agent_experiments \
   --dry-run
 ```
 
-Run all ten experiments serially:
+Run all cases for one workflow serially:
 
 ```bash
 export WARP_CACHE_ROOT=/tmp/newton-warp-cache-$$
 uv run -m evaluation.run_agent_experiments
+```
+
+Run the matched direct-Newton and MCP baselines serially:
+
+```bash
+export WARP_CACHE_ROOT=/tmp/newton-warp-cache-$$
+uv run -m evaluation.run_agent_matrix --run-dir evaluation/results/final-matrix
+```
+
+## Run a targeted optimizer experiment
+
+Optimization is deliberately separate from scene authoring. For a selected MCP
+result, first ask an agent to inspect its baseline video and author one task
+objective. Then run the existing Random, TPE, and CMA-ES suite on that fixed
+scene. This is a targeted experiment; it does not rerun the 12-case agent
+benchmark.
+
+```bash
+uv run -m evaluation.run_agent_objectives \
+  --mcp-run-dir evaluation/results/final-matrix/mcp \
+  --case <case-name> \
+  --output-dir /tmp/ca-objectives
+
+export WARP_CACHE_ROOT=/tmp/newton-warp-cache-$$
+uv run -m evaluation.run_mcp_optimizer_suite \
+  --mcp-run-dir evaluation/results/final-matrix/mcp \
+  --objective-dir /tmp/ca-objectives \
+  --case <case-name> \
+  --output-dir /tmp/ca-optimizer-results
 ```
 
 When `--run-dir` is omitted, results are written beneath
@@ -118,17 +108,18 @@ and continues with the next experiment. Override the limit in seconds with
 
 By default the runner copies only `~/.codex/auth.json` into each temporary
 Codex home. It does not copy user configuration, sessions, or memories. To use
-`OPENAI_API_KEY` instead, pass `--no-auth-copy`. Run one task with `--case`:
+`OPENAI_API_KEY` instead, pass `--no-auth-copy`. To run one selected task,
+pass its evaluator case name to `--case`:
 
 ```bash
 uv run -m evaluation.run_agent_experiments \
-  --case 02_domino_wave \
-  --run-dir /tmp/ca-agent-domino \
+  --case <case-name> \
+  --run-dir /tmp/ca-agent-run \
   --no-auth-copy
 ```
 
 Each case retains its exact prompt, Codex JSONL event log, final message,
-agent-created scene store, and output bundle. `summary.json` reports the Codex
-exit code, elapsed time, and presence of every required artifact. This is a
-black-box generation test: canonical scenes remain evaluator-only and are not
-copied or mounted into the agent workspace.
+agent-created scene store where applicable, and output bundle. `summary.json`
+reports the selected workflow/optimizer, Codex exit code, elapsed time, and
+presence of every required artifact. The direct baseline receives only a copied
+Newton module; it has neither MCP tools nor `ca_framework` source.

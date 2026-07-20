@@ -5,13 +5,16 @@
 
 from __future__ import annotations
 
+import math
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 
 from ca_framework.coupling import CouplerRigidFluid, CouplingExchange
-from ca_framework.metrics import MetricPipeline, TaskMetricSpec, TaskSpec
-from ca_framework.scene import FrameTelemetry, SimulationTelemetry
+from ca_framework.metrics import MetricPipeline, ObjectiveSettings, TaskMetricSpec, TaskSpec
+from ca_framework.scene import FrameTelemetry, ObjectContainer, ObjectRigid, Scene, SimulationTelemetry, Transform
+from ca_framework.scene.executor import SceneExecutorLocal
 
 
 class TestCouplingExchange(unittest.TestCase):
@@ -64,7 +67,92 @@ class TestTelemetry(unittest.TestCase):
         self.assertEqual(records[0]["solver_stats"]["iterations"], 0)
 
 
+class TestContainerRetentionMetric(unittest.TestCase):
+    def test_measures_fraction_inside_rotated_container(self) -> None:
+        container = ObjectContainer(
+            "receiver",
+            inner_size=(2.0, 2.0, 2.0),
+            transform=Transform(position=(1.0, 0.0, 0.0), rotation=(0.0, 0.0, 1.0, 0.0)),
+        )
+        positions = np.asarray(
+            [
+                [2.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, -0.1],
+                [1.0, -1.2, 1.0],
+            ],
+            dtype=np.float64,
+        )
+
+        fraction = SceneExecutorLocal._container_retention_fraction(positions, container)
+
+        self.assertEqual(fraction, 0.5)
+
+    def test_layout_metrics_expose_final_positions_and_pair_distances(self) -> None:
+        scene = Scene(
+            "layout",
+            objects={
+                "left": ObjectRigid("left"),
+                "right": ObjectRigid("right"),
+            },
+        )
+        metrics = SceneExecutorLocal._layout_metrics(
+            scene,
+            {
+                "left": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+                "right": [[0.0, 2.0, 0.0], [4.0, 3.0, 0.0]],
+            },
+        )
+
+        self.assertEqual(metrics["final_body_position"]["left"]["x"], 1.0)
+        self.assertEqual(metrics["body_displacement"]["left"], 1.0)
+        self.assertEqual(metrics["final_body_pair_distance"]["left|right"], math.sqrt(18.0))
+        self.assertEqual(metrics["final_body_pair_horizontal_distance"]["left|right"], math.sqrt(18.0))
+
+    def test_orientation_metrics_measure_tilt_from_world_up(self) -> None:
+        scene = Scene("tilt", objects={"box": ObjectRigid("box")})
+        half_angle = math.pi / 4.0
+        state = SimpleNamespace(
+            body_q=SimpleNamespace(
+                numpy=lambda: np.asarray([[0.0, 0.0, 0.0, 0.0, math.sin(half_angle), 0.0, math.cos(half_angle)]])
+            ),
+            body_qd=SimpleNamespace(numpy=lambda: np.asarray([[3.0, 4.0, 0.0, 0.0, 0.0, 2.0]])),
+        )
+
+        metrics = SceneExecutorLocal._orientation_metrics(
+            scene,
+            SimpleNamespace(body_indices={"box": 0}),
+            state,
+        )
+
+        self.assertAlmostEqual(metrics["final_body_up_alignment"]["box"], 0.0, places=7)
+        self.assertAlmostEqual(metrics["final_body_tilt_angle"]["box"], math.pi / 2.0, places=7)
+        self.assertAlmostEqual(metrics["final_body_linear_speed"]["box"], 5.0, places=7)
+        self.assertAlmostEqual(metrics["final_body_angular_speed"]["box"], 2.0, places=7)
+
+
 class TestMetricPipeline(unittest.TestCase):
+    def test_emitter_source_divergence_is_diagnostic_not_a_constraint(self) -> None:
+        result = MetricPipeline(ObjectiveSettings(max_fluid_divergence=10.0)).evaluate(
+            {
+                "metrics": {
+                    "physics": {"valid": True},
+                    "fluid": {
+                        "water": {
+                            "finite": True,
+                            "peak_divergence": 100.0,
+                            "divergence_constraint_applicable": False,
+                            "mass_conservation_applicable": False,
+                        }
+                    },
+                }
+            }
+        )
+
+        self.assertTrue(result.feasible)
+        self.assertNotIn("fluid.water.divergence", result.constraints)
+        self.assertNotIn("fluid.water.divergence", result.metrics)
+
     def test_feasible_result_uses_normalized_robust_loss(self) -> None:
         result = MetricPipeline().evaluate(
             {
@@ -107,6 +195,35 @@ class TestMetricPipeline(unittest.TestCase):
         self.assertGreaterEqual(result.objective, 1000.0)
         self.assertIn("physics_valid", result.failure_reason)
 
+    def test_feasible_objective_stays_below_infeasible_range_for_large_task_loss(self) -> None:
+        settings = ObjectiveSettings(infeasible_base=100.0)
+        feasible = MetricPipeline(settings).evaluate(
+            {
+                "metrics": {
+                    "max_penetration": 0.0,
+                    "physics": {"valid": True},
+                    "fluid": {},
+                    "cloth": {},
+                }
+            },
+            task_metrics={"large_loss": 1.0e9},
+        )
+        infeasible = MetricPipeline(settings).evaluate(
+            {
+                "metrics": {
+                    "max_penetration": 0.0,
+                    "physics": {"valid": False},
+                    "fluid": {},
+                    "cloth": {},
+                }
+            }
+        )
+
+        self.assertTrue(feasible.feasible)
+        self.assertLess(feasible.objective, settings.infeasible_base)
+        self.assertGreaterEqual(infeasible.objective, settings.infeasible_base)
+        self.assertLess(feasible.objective, infeasible.objective)
+
     def test_nonfinite_metric_is_infeasible(self) -> None:
         result = MetricPipeline().evaluate(
             {
@@ -119,6 +236,103 @@ class TestMetricPipeline(unittest.TestCase):
             }
         )
         self.assertFalse(result.feasible)
+
+    def test_stability_metrics_are_part_of_physics_loss(self) -> None:
+        result = MetricPipeline().evaluate(
+            {
+                "metrics": {
+                    "max_penetration": 0.0,
+                    "physics": {"valid": True},
+                    "fluid": {},
+                    "cloth": {
+                        "sheet": {
+                            "finite": True,
+                            "max_edge_length_ratio": 1.5,
+                            "min_triangle_area_ratio": 0.7,
+                            "max_triangle_area_ratio": 1.3,
+                            "flipped_triangle_count": 0,
+                            "final_residual_speed": 0.0,
+                        }
+                    },
+                    "coupling": {
+                        "impulse_balance_error": 0.01,
+                        "angular_impulse_balance_error": 0.01,
+                        "interface_velocity_residual": 2.0,
+                        "exchange_energy_error": 5.0,
+                    },
+                }
+            }
+        )
+        self.assertTrue(result.feasible)
+        self.assertGreater(result.metrics["physics_loss"], 0.0)
+        self.assertIn("cloth.sheet.edge_distortion", result.metrics)
+        self.assertIn("coupling.interface_velocity_residual", result.metrics)
+
+    def test_rigid_cloth_penetration_and_contact_duration_are_hard_constraints(self) -> None:
+        result = MetricPipeline().evaluate(
+            {
+                "metrics": {
+                    "max_penetration": 0.0,
+                    "physics": {"valid": True},
+                    "fluid": {},
+                    "cloth": {},
+                    "coupling": {
+                        "max_rigid_cloth_penetration": 0.03,
+                        "contact_duration": {"rigid-cloth:cloth|ball": 0.2},
+                    },
+                }
+            },
+            coupling_metrics={
+                "max_rigid_cloth_penetration": 0.03,
+                "contact_duration": {"rigid-cloth:cloth|ball": 0.2},
+            },
+        )
+        self.assertFalse(result.feasible)
+        self.assertIn("coupling.rigid_cloth_penetration", result.failure_reason)
+
+        duration_result = MetricPipeline(
+            ObjectiveSettings(minimum_coupling_contact_duration={"rigid-cloth:cloth|ball": 0.5})
+        ).evaluate(
+            {
+                "metrics": {
+                    "max_penetration": 0.0,
+                    "physics": {"valid": True},
+                    "fluid": {},
+                    "cloth": {},
+                    "coupling": {
+                        "max_rigid_cloth_penetration": 0.0,
+                        "contact_duration": {"rigid-cloth:cloth|ball": 0.2},
+                    },
+                }
+            }
+        )
+        self.assertFalse(duration_result.feasible)
+        self.assertIn("coupling.contact_duration.rigid-cloth:cloth|ball", duration_result.failure_reason)
+
+    def test_liquid_cloth_penetration_fraction_is_a_hard_constraint(self) -> None:
+        result = MetricPipeline(
+            ObjectiveSettings(max_liquid_cloth_penetration_fraction=0.1)
+        ).evaluate(
+            {
+                "metrics": {
+                    "max_penetration": 0.0,
+                    "physics": {"valid": True},
+                    "cloth": {},
+                    "fluid": {
+                        "water": {
+                            "phase": "liquid",
+                            "finite": True,
+                            "particles": 100,
+                            "peak_divergence": 0.0,
+                            "relative_mass_change": 0.0,
+                            "cloth_penetration_count": {"membrane": 12},
+                        }
+                    },
+                }
+            }
+        )
+        self.assertFalse(result.feasible)
+        self.assertIn("fluid.water.cloth.membrane.penetration_fraction", result.failure_reason)
 
 
 class TestTaskSpec(unittest.TestCase):
@@ -133,6 +347,11 @@ class TestTaskSpec(unittest.TestCase):
         losses = spec.evaluate({"metrics": {"contacts": 2, "max_penetration": 0.03}})
         self.assertEqual(losses["contact"], 0.0)
         self.assertAlmostEqual(losses["penetration"], 0.02)
+
+    def test_missing_event_metric_becomes_task_loss(self) -> None:
+        spec = TaskSpec("contact-task", (TaskMetricSpec("contact", "metrics.contact_time", 1.0),))
+        losses = spec.evaluate({"metrics": {}})
+        self.assertEqual(losses["contact"], 10.0)
 
 
 if __name__ == "__main__":

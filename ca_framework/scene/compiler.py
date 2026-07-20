@@ -209,7 +209,7 @@ class SceneCompilerNewton:
                 scale_x, scale_y, _ = item.transform.scale
                 particle_mass = item.surface_density * item.size[0] * item.size[1] / (width * height)
                 builder.add_cloth_grid(
-                    pos=wp.vec3(*item.transform.position),
+                    pos=wp.vec3(*self._cloth_grid_origin(item)),
                     rot=wp.quat(*item.transform.rotation),
                     vel=wp.vec3(),
                     dim_x=width - 1,
@@ -456,6 +456,7 @@ class SceneCompilerNewton:
                             position=obstacle.transform.position,
                             half_extent=half_extent,
                             body=body_indices.get(obstacle.id),
+                            rotation=obstacle.transform.rotation,
                         )
                     )
                 for container in scene_containers:
@@ -468,6 +469,7 @@ class SceneCompilerNewton:
                                 half_extent=tuple(value * 0.5 for value in wall["size"]),
                                 body=body_indices.get(container.id),
                                 local_position=local_wall["position"],
+                                rotation=container.transform.rotation,
                             )
                         )
                 cloth_boundary_type = newton.solvers.SolverFluidAPIC.ClothBoundary
@@ -654,3 +656,11 @@ if __name__ == "__main__":
             vy + w * ty + z * tx - x * tz,
             vz + w * tz + x * ty - y * tx,
         )
+
+    @classmethod
+    def _cloth_grid_origin(cls, cloth: ObjectCloth) -> tuple[float, float, float]:
+        """Return Newton's lower-left grid origin for a center-defined cloth."""
+        scale_x, scale_y, _ = cloth.transform.scale
+        local_offset = (-0.5 * cloth.size[0] * scale_x, -0.5 * cloth.size[1] * scale_y, 0.0)
+        rotated_offset = cls._rotate_vector(local_offset, cloth.transform.rotation)
+        return tuple(cloth.transform.position[axis] + rotated_offset[axis] for axis in range(3))

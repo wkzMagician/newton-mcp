@@ -18,10 +18,11 @@ class TaskMetricSpec:
     target: float
     tolerance: float = 1.0
     mode: Literal["target", "minimum", "maximum"] = "target"
+    missing_loss: float = 10.0
 
     def __post_init__(self) -> None:
-        if not self.name or not self.path or self.tolerance <= 0.0:
-            raise ValueError("Task metric name/path and positive tolerance are required")
+        if not self.name or not self.path or self.tolerance <= 0.0 or self.missing_loss < 0.0:
+            raise ValueError("Task metric name/path, positive tolerance, and non-negative missing loss are required")
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,7 +48,16 @@ class TaskSpec:
         """Evaluate all configured result paths as lower-is-better losses."""
         result = {}
         for spec in self.metrics:
-            value = float(_resolve(simulation, spec.path))
+            try:
+                value = float(_resolve(simulation, spec.path))
+            except ValueError as error:
+                if not str(error).startswith("Unknown task metric path"):
+                    raise
+                # A validated path can disappear when a candidate fails to create
+                # an event (for example, no contact).  This is a task miss, not a
+                # framework exception that should terminate the optimization run.
+                result[spec.name] = spec.missing_loss
+                continue
             if spec.mode == "target":
                 loss = abs(value - spec.target) / spec.tolerance
             elif spec.mode == "minimum":
